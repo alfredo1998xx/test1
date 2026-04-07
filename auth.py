@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from sqlalchemy.orm import Session
-from passlib.hash import bcrypt
+import bcrypt as _bcrypt
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from database import SessionLocal
@@ -72,7 +72,7 @@ async def signup(user: UserCreate, request: Request, db: Session = Depends(get_d
         if email_exists:
             raise HTTPException(status_code=400, detail="Email already exists")
 
-    hashed = bcrypt.hash(user.password)
+    hashed = _bcrypt.hashpw(user.password.encode('utf-8'), _bcrypt.gensalt()).decode('utf-8')
 
     role = user.role or "manager"
     hotel_name = user.hotel_name if role != "Super User" else ""
@@ -122,7 +122,7 @@ def login(user: UserLogin, db: Session = Depends(get_db)):
         or_(User.username == user.username, User.email == user.username)
     ).first()
 
-    if not db_user or not bcrypt.verify(user.password, db_user.hashed_password):
+    if not db_user or not _bcrypt.checkpw(user.password.encode('utf-8'), db_user.hashed_password.encode('utf-8')):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
     token = jwt.encode(
@@ -358,7 +358,7 @@ def debug_users_email(db: Session = Depends(get_db)):
     ]
 
 @router.post("/forgot-password")
-def forgot_password(email: str, db: Session = Depends(get_db)):
+def forgot_password(email: str = Query(...), db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.email == email).first()
     if not user:
@@ -398,7 +398,7 @@ Labor Pilot
     return {"detail": "Password reset email sent"}
 
 @router.post("/reset-password")
-def reset_password(token: str, new_password: str, db: Session = Depends(get_db)):
+def reset_password(token: str = Query(...), new_password: str = Query(...), db: Session = Depends(get_db)):
 
     user = db.query(User).filter(User.reset_token == token).first()
     if not user:
@@ -411,7 +411,7 @@ def reset_password(token: str, new_password: str, db: Session = Depends(get_db))
     if datetime.utcnow() > expires_at:
         raise HTTPException(status_code=400, detail="Reset token has expired")
 
-    user.hashed_password = bcrypt.hash(new_password)
+    user.hashed_password = _bcrypt.hashpw(new_password.encode('utf-8'), _bcrypt.gensalt()).decode('utf-8')
 
     user.reset_token = None
     user.reset_token_expires = None

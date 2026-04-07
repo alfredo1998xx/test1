@@ -428,7 +428,8 @@ def get_user_from_token(token: str, db: Session = Depends(get_db)):
     return {"username": user.username}
 @router.get("/my-scope")
 def get_my_scope(user=Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.role.lower() != "manager":
+    # Return scope for managers and employees (both are department-scoped)
+    if user.role.strip().lower() not in ("manager", "employee"):
         return []
 
     rows = db.query(UserAccessControl).filter(

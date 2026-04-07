@@ -277,7 +277,7 @@ st.set_page_config(page_title="Hotel Labor Tool", layout="wide", initial_sidebar
 def apply_manager_scope(df):
     user = st.session_state.user
 
-    if user["role"].lower() in ["admin", "super user"]:
+    if user["role"].strip().lower() in ("admin", "super user", "night audit"):
         return df
 
     scopes = user.get("scope", [])
@@ -1244,13 +1244,20 @@ menu_options = [
     "Scheduled Tasks",
 ]
 
-# hide Labor ▸ Structure for Manager role
-if role == "manager":
-    menu_options = [m for m in menu_options if m != "Labor ▸ Structure"]
-
-# Allow Super User and Admin roles to access Admin tab
-if role in ("super user", "admin"):
-    menu_options.append("Admin")
+# Role-based menu access
+if role == "employee":
+    # Employees only see the Scheduling page
+    menu_options = ["Scheduling"]
+elif role == "night audit":
+    # Night Audit only sees Room STATs
+    menu_options = ["Room STATs"]
+else:
+    # Hide Labor Structure from Managers
+    if role == "manager":
+        menu_options = [m for m in menu_options if m != "Labor ▸ Structure"]
+    # Super User and Admin get the Admin tab
+    if role in ("super user", "admin"):
+        menu_options.append("Admin")
 
 main_choice = st.sidebar.radio("Menu", menu_options, key="main_menu")
 
@@ -2595,10 +2602,12 @@ elif main_choice == "Employees":
 
         emp_df = refresh(db.Employee)
 
-        # 🔒 Enforce manager scope (Schedule Availability)
-        emp_df = apply_manager_scope(
-            emp_df.rename(columns={"role": "position"})
-        ).rename(columns={"position": "role"})
+        # 🔒 Enforce manager/employee scope (Schedule Availability)
+        _role_norm = (st.session_state.user.get("role") or "").strip().lower()
+        if _role_norm in ("manager", "employee"):
+            emp_df = apply_manager_scope(
+                emp_df.rename(columns={"role": "position"})
+            ).rename(columns={"position": "role"})
 
         # ── All existing availability rows (dummy week only) ───────────────
         dummy_dates = list(WK_TO_DATE.values())      # 2000-01-03 … 2000-01-09
@@ -10997,7 +11006,7 @@ elif main_choice == "Scheduled Tasks":
                                     st.rerun()
 
 elif main_choice == "Admin":
-    if st.session_state.user.get("role") not in ["Admin", "Super User"]:
+    if role not in ("admin", "super user"):  # role is already normalized to lowercase
         st.warning("⛔ You are not authorized to access this page.")
         st.stop()
 
@@ -11040,7 +11049,7 @@ elif main_choice == "Admin":
         can_view_hourly = False
         selected_positions_by_dept = {}
 
-        if st.session_state.user["role"] in ["Admin", "Super User"]:
+        if role in ("admin", "super user"):
               # Cache departments once
               if "departments_cache" not in st.session_state:
                     dept_resp = requests.get(
@@ -11081,12 +11090,12 @@ elif main_choice == "Admin":
             new_email = st.text_input("Email Address", key="new_email_create_user")
             new_password = st.text_input("Password", type="password", key="new_password_create_user")
 
-            if st.session_state.user["role"] == "Admin":
-                new_role = st.selectbox("Role", ["Manager", "Admin"], key="role_create_user_admin")
+            if role == "admin":
+                new_role = st.selectbox("Role", ["Manager", "Employee", "Night Audit"], key="role_create_user_admin")
                 new_hotel = st.session_state.user["hotel_name"]
                 st.text_input("Hotel Name", value=new_hotel, disabled=True, key="hotel_name_display_admin")
             else:
-                new_role = st.selectbox("Role", ["Manager", "Admin", "Super User"], key="role_create_user_super")
+                new_role = st.selectbox("Role", ["Manager", "Admin", "Employee", "Night Audit", "Super User"], key="role_create_user_super")
                 new_hotel = st.text_input("Hotel Name", key="hotel_name_input_super")
 
             submit_user = st.form_submit_button("Create User")  # <-- inside the form
@@ -11106,7 +11115,7 @@ elif main_choice == "Admin":
             }
 
             # Only attach access_control if creating a Manager
-            if new_role.lower() == "manager":
+            if new_role.lower() in ("manager", "employee"):
                   access_control = []
                   for dept, pos_list in selected_positions_by_dept.items():
                         for pos in pos_list:
@@ -11143,7 +11152,7 @@ elif main_choice == "Admin":
                 df = df[["username", "email", "role", "hotel_name", "id"]]
 
             # Admins only see their hotel; Super Users see all
-            if st.session_state.user["role"] == "Admin":
+            if role == "admin":
                 df = df[df["hotel_name"] == st.session_state.user["hotel_name"]]
 
             if df.empty:
@@ -11158,7 +11167,7 @@ elif main_choice == "Admin":
                 del_df = df.copy()
                 if "role" in del_df.columns:
                     # Admins cannot delete Super Users
-                    if st.session_state.user["role"] == "Admin":
+                    if role == "admin":
                         del_df = del_df[del_df["role"].str.lower() != "super user"]
 
                 # Guard against empty after filtering
@@ -11269,8 +11278,8 @@ elif main_choice == "Admin":
             users = response.json()
             df = pd.DataFrame(users)
 
-            if st.session_state.user["role"] == "Admin":
-                df = df[(df["hotel_name"] == st.session_state.user["hotel_name"]) & (df["role"] != "Super User")]
+            if role == "admin":
+                df = df[(df["hotel_name"] == st.session_state.user["hotel_name"]) & (df["role"].str.lower() != "super user")]
 
             if df.empty:
                 st.info("No users available to edit.")
@@ -11278,12 +11287,12 @@ elif main_choice == "Admin":
                 selected_user = st.selectbox("Select User", df["username"])
                 selected = df[df["username"] == selected_user].iloc[0]
 
-                if st.session_state.user["role"] == "Admin":
-                    new_role = st.selectbox("New Role", ["Manager", "Admin"], index=["Manager", "Admin"].index(selected["role"]))
+                if role == "admin":
+                    new_role = st.selectbox("New Role", ["Manager", "Admin", "Employee", "Night Audit"])
                     st.text_input("Hotel Name", value=selected["hotel_name"], disabled=True)
                     new_hotel = selected["hotel_name"]
                 else:
-                    new_role = st.selectbox("New Role", ["manager", "admin", "Super User"], index=["manager", "admin", "Super User"].index(selected["role"]))
+                    new_role = st.selectbox("New Role", ["Manager", "Admin", "Employee", "Night Audit", "Super User"])
                     new_hotel = st.text_input("Hotel Name", value=selected["hotel_name"])
 
                 if st.button("Update User"):

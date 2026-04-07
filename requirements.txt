@@ -27,3 +27,4 @@ xlsxwriter
 bcrypt
 python-jose[cryptography]
 uvicorn
+streamlit==1.38.0

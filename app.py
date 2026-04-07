@@ -30,7 +30,7 @@ def build_ot_risk_exports(export_df, hotel_name, username, week_start, week_end,
       return excel_bytes, pdf_bytes
 def get_scoped_session():
     return SQLASession(bind=ENGINE)
-ENGINE = create_engine("sqlite:///hotel_labor.db", echo=False)
+# ENGINE is imported from db.py (uses DATABASE_URL / PostgreSQL)
 
 
 def _current_role() -> str:
@@ -1030,7 +1030,7 @@ def generate_ot_risk_data(week_start, week_end, sel_dept, sel_pos):
     return agg
 def save_ot_risk_to_db(week_start, week_end, sel_dept, sel_pos):
     from sqlalchemy import create_engine
-    ENGINE = create_engine("sqlite:///hotel_labor.db", echo=False)
+    # ENGINE is imported from db.py (uses DATABASE_URL / PostgreSQL)
 
     df = generate_ot_risk_data(week_start, week_end, sel_dept, sel_pos)
     if df.empty:

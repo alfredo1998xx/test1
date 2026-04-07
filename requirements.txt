@@ -28,3 +28,4 @@ bcrypt
 python-jose[cryptography]
 uvicorn
 streamlit==1.38.0
+psycopg2-binary

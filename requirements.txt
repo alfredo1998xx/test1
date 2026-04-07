@@ -24,3 +24,6 @@ sqlalchemy
 streamlit
 streamlit-aggrid
 xlsxwriter
+bcrypt
+python-jose[cryptography]
+uvicorn

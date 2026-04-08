@@ -1276,17 +1276,17 @@ if _os.path.exists(_logo_path):
         <style>
         .lp-sidebar-logo {{
             position : fixed;
-            bottom   : 18px;
+            bottom   : 12px;
             left     : 0;
             width    : 185px;
             display  : flex;
             justify-content: center;
-            padding  : 0 12px;
+            padding  : 0 4px;
             box-sizing: border-box;
             z-index  : 9999;
         }}
         .lp-sidebar-logo img {{
-            width    : 165px;
+            width    : 177px;
             max-width: 100%;
             height   : auto;
         }}

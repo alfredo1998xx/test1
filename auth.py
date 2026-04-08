@@ -330,7 +330,7 @@ def delete_user(username: str,
                 db: Session = Depends(get_db)):
 
     # Only Admins and Super Users can delete users
-    if current_user.role not in ["Admin", "Super User"]:
+    if not has_role(current_user, ["Admin", "Super User"]):
         raise HTTPException(status_code=403, detail="Not authorized")
 
     user = db.query(User).filter(User.username == username).first()

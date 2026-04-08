@@ -449,6 +449,9 @@ section[data-testid="stMain"] .stDateInput input {
 if st.query_params.get("logout") == "1":
     for k in list(st.session_state.keys()):
         del st.session_state[k]
+    # Reset menu widget to default so a new user doesn't inherit the previous page
+    st.session_state["main_menu"] = "Dashboard"
+    st.session_state["acl_loaded"] = False
     st.query_params.clear()
     st.rerun()
 
@@ -893,11 +896,11 @@ def load_acl_once():
       """Fetch (department, position) pairs + hourly-flag for the logged-in user and cache in session."""
       if st.session_state.get("acl_loaded"):
             return
-      user = st.session_state.user["username"]
       headers = {"Authorization": f"Bearer {st.session_state.token}"}
 
       try:
-            r = requests.get(f"{API_URL}/users/{user}/access", headers=headers, timeout=10)
+            # Use /my/access — works for all roles (Admin, Manager, Employee, Night Audit)
+            r = requests.get(f"{API_URL}/my/access", headers=headers, timeout=10)
             rows = r.json() if r.status_code == 200 else []
       except Exception:
             rows = []

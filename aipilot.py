@@ -304,22 +304,22 @@ def render_smart_charts(data: dict, intents: list, question: str):
     chart_cols = st.columns(2)
     col_idx = 0
 
-    CHART_BG    = "rgba(10,10,30,0)"
-    GRID_COLOR  = "rgba(120,100,255,0.08)"
-    FONT_COLOR  = "#c8b8ff"
-    ACCENT1     = "#7B68EE"
-    ACCENT2     = "#00D4FF"
-    ACCENT_OT   = "#FF4C6A"
+    CHART_BG    = "rgba(0,0,0,0)"
+    GRID_COLOR  = "rgba(0,0,0,0.06)"
+    FONT_COLOR  = "#444"
+    ACCENT1     = "#2196F3"
+    ACCENT2     = "#4CAF50"
+    ACCENT_OT   = "#FF5722"
 
     base_layout = dict(
-        template="plotly_dark",
+        template="plotly_white",
         paper_bgcolor=CHART_BG,
         plot_bgcolor=CHART_BG,
         font=dict(color=FONT_COLOR, size=11),
         margin=dict(t=40, b=30, l=10, r=10),
         xaxis=dict(gridcolor=GRID_COLOR, showline=False),
         yaxis=dict(gridcolor=GRID_COLOR, showline=False),
-        title_font=dict(size=13, color="#a898ff"),
+        title_font=dict(size=13, color="#3D52A0"),
     )
 
     # Chart: Hours by Department
@@ -414,172 +414,53 @@ def render_smart_charts(data: dict, intents: list, question: str):
 def render_aipilot(hotel: str):
     st.markdown("""
     <style>
-    /* ── AIPilot global styles ── */
     .ai-hero {
-        background: linear-gradient(135deg, #0d0d1a 0%, #1a0a2e 40%, #0d1a2e 100%);
-        border-radius: 16px;
-        padding: 32px 36px 28px;
-        margin-bottom: 20px;
-        position: relative;
-        overflow: hidden;
-        border: 1px solid rgba(123,104,238,0.25);
+        background: linear-gradient(135deg, #3D52A0 0%, #5C6FBF 60%, #8697C4 100%);
+        border-radius: 14px; padding: 28px 32px 24px; margin-bottom: 20px;
+        box-shadow: 0 4px 20px rgba(61,82,160,0.2);
     }
-    .ai-hero::before {
-        content: "";
-        position: absolute;
-        top: -60px; right: -60px;
-        width: 200px; height: 200px;
-        background: radial-gradient(circle, rgba(123,104,238,0.18) 0%, transparent 70%);
-        border-radius: 50%;
-        pointer-events: none;
-    }
-    .ai-hero::after {
-        content: "";
-        position: absolute;
-        bottom: -40px; left: -40px;
-        width: 160px; height: 160px;
-        background: radial-gradient(circle, rgba(0,212,255,0.1) 0%, transparent 70%);
-        border-radius: 50%;
-        pointer-events: none;
-    }
-    .ai-title {
-        font-size: 28px; font-weight: 900;
-        background: linear-gradient(90deg, #a78bfa, #60a5fa, #34d399);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        background-clip: text;
-        letter-spacing: -0.5px; line-height: 1.1;
-        margin-bottom: 4px;
-    }
-    .ai-subtitle {
-        color: rgba(168,152,255,0.65); font-size: 13px; margin-top: 2px;
-    }
-    .ai-input-wrap {
-        position: relative; margin-top: 20px;
-    }
-    .ai-glow-label {
-        color: #a78bfa; font-size: 12px; font-weight: 600;
-        letter-spacing: 0.8px; text-transform: uppercase;
-        margin-bottom: 6px;
-    }
-    /* Pulse badge */
+    .ai-title { font-size: 26px; font-weight: 900; color: #ffffff; letter-spacing: -0.5px; line-height: 1.15; margin-bottom: 2px; }
+    .ai-subtitle { color: rgba(255,255,255,0.72); font-size: 13px; margin-top: 2px; }
     .ai-live-badge {
         display: inline-flex; align-items: center; gap: 5px;
-        background: rgba(0,212,255,0.12);
-        border: 1px solid rgba(0,212,255,0.3);
-        border-radius: 20px; padding: 3px 10px;
-        font-size: 11px; color: #00d4ff; font-weight: 600;
-        letter-spacing: 0.4px;
+        background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);
+        border-radius: 20px; padding: 3px 10px; font-size: 11px; color: #ffffff; font-weight: 600;
     }
     .ai-live-dot {
-        width: 6px; height: 6px; border-radius: 50%;
-        background: #00d4ff;
-        animation: ai-pulse 1.6s ease-in-out infinite;
-        display: inline-block;
+        width: 6px; height: 6px; border-radius: 50%; background: #4CAF50;
+        animation: ai-pulse 1.6s ease-in-out infinite; display: inline-block;
     }
-    @keyframes ai-pulse {
-        0%, 100% { opacity: 1; transform: scale(1); }
-        50%       { opacity: 0.3; transform: scale(0.7); }
-    }
-
-    /* AI response card */
+    @keyframes ai-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(0.7); } }
     .ai-response-card {
-        background: linear-gradient(145deg, #0f0f24 0%, #1a1040 100%);
-        border: 1px solid rgba(123,104,238,0.3);
-        border-radius: 14px;
-        padding: 24px 28px;
-        margin: 16px 0;
-        font-size: 14.5px;
-        line-height: 1.8;
-        color: #e2d9ff;
-        white-space: pre-wrap;
-        box-shadow: 0 4px 30px rgba(100,80,200,0.15), 0 0 0 1px rgba(123,104,238,0.1);
-        position: relative;
-    }
-    .ai-response-card::before {
-        content: "";
-        position: absolute; top: 0; left: 0; right: 0; height: 1px;
-        background: linear-gradient(90deg, transparent, rgba(167,139,250,0.6), transparent);
-        border-radius: 14px 14px 0 0;
+        background: linear-gradient(135deg, #f8f9ff 0%, #ffffff 100%);
+        border: 1px solid #e0e4f0; border-left: 4px solid #3D52A0;
+        border-radius: 10px; padding: 22px 26px; margin: 12px 0 16px 0;
+        font-size: 14.5px; line-height: 1.8; color: #1a1a2e; white-space: pre-wrap;
+        box-shadow: 0 2px 12px rgba(61,82,160,0.08);
     }
     .ai-model-tag {
         display: inline-flex; align-items: center; gap: 6px;
-        background: rgba(167,139,250,0.12);
-        border: 1px solid rgba(167,139,250,0.2);
-        border-radius: 20px; padding: 3px 12px;
-        font-size: 11px; color: #a78bfa; font-weight: 600;
-        margin-bottom: 12px;
-        letter-spacing: 0.3px;
+        background: linear-gradient(135deg, #3D52A0, #8697C4);
+        border-radius: 20px; padding: 3px 12px; font-size: 11px; color: #fff; font-weight: 600; margin-bottom: 10px;
     }
-    /* Metric pills */
-    .ai-metrics-row {
-        display: flex; flex-wrap: wrap; gap: 10px;
-        margin: 16px 0 4px 0;
-    }
-    .ai-metric {
-        background: rgba(123,104,238,0.1);
-        border: 1px solid rgba(123,104,238,0.2);
-        border-radius: 10px;
-        padding: 10px 16px;
-        min-width: 110px;
-        text-align: center;
-        transition: all 0.2s;
-    }
-    .ai-metric:hover {
-        background: rgba(123,104,238,0.18);
-        border-color: rgba(167,139,250,0.4);
-    }
-    .ai-metric .val { font-size: 20px; font-weight: 800; color: #a78bfa; line-height: 1.2; }
-    .ai-metric .val.red { color: #ff4c6a; }
-    .ai-metric .val.teal { color: #00d4ff; }
-    .ai-metric .lbl { font-size: 10px; color: rgba(180,165,255,0.6); margin-top: 2px; letter-spacing: 0.3px; }
-
-    /* Period badge */
+    .ai-metrics-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0 4px 0; }
+    .ai-metric { background: #f0f4ff; border: 1px solid #d0d8f5; border-radius: 10px; padding: 10px 16px; min-width: 110px; text-align: center; }
+    .ai-metric .val { font-size: 20px; font-weight: 800; color: #3D52A0; line-height: 1.2; }
+    .ai-metric .val.red { color: #FF5722; }
+    .ai-metric .val.teal { color: #2196F3; }
+    .ai-metric .lbl { font-size: 10px; color: #888; margin-top: 2px; }
     .ai-period-badge {
         display: inline-flex; align-items: center; gap: 5px;
-        background: rgba(0,212,255,0.08);
-        border: 1px solid rgba(0,212,255,0.2);
-        border-radius: 8px; padding: 4px 12px;
-        font-size: 11px; color: rgba(0,212,255,0.8);
-        margin-bottom: 10px;
+        background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 4px 12px;
+        font-size: 11px; color: #3D52A0; margin-bottom: 10px;
     }
-
-    /* Charts area */
-    .ai-charts-header {
-        color: rgba(167,139,250,0.7);
-        font-size: 11px; font-weight: 600;
-        letter-spacing: 0.8px; text-transform: uppercase;
-        margin: 20px 0 8px 0;
-        display: flex; align-items: center; gap: 8px;
-    }
-    .ai-charts-divider {
-        height: 1px;
-        background: linear-gradient(90deg, rgba(123,104,238,0.3), transparent);
-        margin-bottom: 12px;
-    }
-
-    /* Empty state */
-    .ai-empty {
-        background: linear-gradient(135deg, #0d0d1a, #1a1040);
-        border: 1px dashed rgba(123,104,238,0.25);
-        border-radius: 14px;
-        padding: 48px 24px;
-        text-align: center;
-        margin-top: 8px;
-    }
+    .ai-charts-header { color: #3D52A0; font-size: 12px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; margin: 20px 0 6px 0; }
+    .ai-charts-divider { height: 1px; background: linear-gradient(90deg, #3D52A0, transparent); margin-bottom: 12px; opacity: 0.2; }
+    .ai-empty { background: #f8f9ff; border: 1px dashed #c7d2fe; border-radius: 12px; padding: 48px 24px; text-align: center; margin-top: 8px; }
     .ai-empty-icon { font-size: 40px; margin-bottom: 12px; }
-    .ai-empty-title { color: #a78bfa; font-size: 15px; font-weight: 700; margin-bottom: 6px; }
-    .ai-empty-sub { color: rgba(168,152,255,0.45); font-size: 13px; }
-    .ai-suggestion {
-        display: inline-block;
-        background: rgba(123,104,238,0.1);
-        border: 1px solid rgba(123,104,238,0.2);
-        border-radius: 8px;
-        padding: 6px 14px;
-        margin: 4px;
-        font-size: 12px;
-        color: #c4b5fd;
-        cursor: pointer;
-    }
+    .ai-empty-title { color: #3D52A0; font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+    .ai-empty-sub { color: #888; font-size: 13px; }
+    .ai-suggestion { display: inline-block; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 6px 14px; margin: 4px; font-size: 12px; color: #3D52A0; cursor: pointer; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -611,44 +492,24 @@ def render_aipilot(hotel: str):
         label_visibility="collapsed",
     )
 
-    # Style the text area to look AI-native
     st.markdown("""
     <style>
     div[data-testid="stTextArea"] textarea {
-        background: rgba(13,13,30,0.95) !important;
-        border: 1.5px solid rgba(123,104,238,0.4) !important;
-        border-radius: 12px !important;
-        color: #e2d9ff !important;
+        background: #ffffff !important;
+        border: 1.5px solid #c7d2fe !important;
+        border-radius: 10px !important;
+        color: #1a1a2e !important;
         font-size: 14px !important;
         padding: 14px 16px !important;
-        box-shadow: 0 0 20px rgba(123,104,238,0.08) !important;
+        box-shadow: 0 2px 8px rgba(61,82,160,0.06) !important;
         transition: border-color 0.2s, box-shadow 0.2s !important;
-        caret-color: #a78bfa !important;
     }
     div[data-testid="stTextArea"] textarea:focus {
-        border-color: rgba(167,139,250,0.7) !important;
-        box-shadow: 0 0 0 3px rgba(123,104,238,0.15), 0 0 25px rgba(123,104,238,0.12) !important;
+        border-color: #3D52A0 !important;
+        box-shadow: 0 0 0 3px rgba(61,82,160,0.1) !important;
     }
     div[data-testid="stTextArea"] textarea::placeholder {
-        color: rgba(167,139,250,0.35) !important;
-    }
-    /* Generate button */
-    div[data-testid="stButton"] > button[kind="primary"] {
-        background: linear-gradient(135deg, #7B68EE, #5B4CC8) !important;
-        border: none !important;
-        border-radius: 10px !important;
-        color: white !important;
-        font-weight: 700 !important;
-        padding: 10px 28px !important;
-        font-size: 14px !important;
-        letter-spacing: 0.3px !important;
-        box-shadow: 0 4px 15px rgba(123,104,238,0.35) !important;
-        transition: all 0.2s !important;
-    }
-    div[data-testid="stButton"] > button[kind="primary"]:hover {
-        background: linear-gradient(135deg, #9179f2, #7B68EE) !important;
-        box-shadow: 0 6px 25px rgba(123,104,238,0.5) !important;
-        transform: translateY(-1px) !important;
+        color: rgba(61,82,160,0.4) !important;
     }
     </style>
     """, unsafe_allow_html=True)

@@ -447,12 +447,10 @@ section[data-testid="stMain"] .stDateInput input {
 
 # --- handle logout via query param ---
 if st.query_params.get("logout") == "1":
-    _next_count = st.session_state.get("_logout_count", 0) + 1
     st.session_state.clear()
-    # Increment logout counter so login form gets a fresh key each time
-    st.session_state["_logout_count"] = _next_count
-    st.query_params.clear()
-    st.rerun()
+    # Hard browser redirect to clean URL — removes ?logout=1 from address bar
+    st.markdown('<meta http-equiv="refresh" content="0;url=/">', unsafe_allow_html=True)
+    st.stop()
 
 # ---------- decide if the user is logged in ----------
 # Pick the key your app sets after successful login:

@@ -1283,7 +1283,8 @@ st.markdown("""
 
     /* ───── Sidebar Width ───── */
     [data-testid="stSidebar"][aria-expanded="true"] > div:first-child {
-        width: 220px;
+        width: 185px;
+        min-width: 185px;
     }
 
     /* ───── Sidebar Text Styling ───── */
@@ -1293,7 +1294,7 @@ st.markdown("""
 
     [data-testid="stSidebar"] label,
     [data-testid="stSidebar"] span {
-        font-size: 15px !important;
+        font-size: 13px !important;
     }
 
     section[data-testid="stSidebar"] h1,
@@ -1369,9 +1370,9 @@ if page_changed:
       <div id="la_overlay_fixed" aria-label="Loading"
            style="opacity:1; visibility:visible;">
 
-        <!-- White backdrop ONLY over main content (sidebar width = 220px) -->
+        <!-- White backdrop ONLY over main content (sidebar width = 185px) -->
         <div style="
-             position:fixed; top:0; left:255px; right:0; bottom:0;
+             position:fixed; top:0; left:220px; right:0; bottom:0;
              background:#ffffff; pointer-events:none;
              z-index:2147483646;                  /* below spinner */
              animation: la_fadeout 1.0s forwards;">

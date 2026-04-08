@@ -296,6 +296,13 @@ def apply_manager_scope(df):
 st.markdown("""
 <style>
 
+/* ───── VIEWPORT SCALE (85% zoom feel) ───── */
+html {
+    zoom: 0.85;
+    -moz-transform: scale(0.85);
+    -moz-transform-origin: top left;
+}
+
 /* ───── REMOVE STREAMLIT CHROME ───── */
 header[data-testid="stHeader"] { display: none !important; }
 div[data-testid="stToolbar"]  { display: none !important; }

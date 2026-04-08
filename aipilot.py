@@ -1235,7 +1235,54 @@ def render_aipilot(hotel: str):
 
     run_btn = st.button("✦ Generate Insight", type="primary")
 
-    if not run_btn:
+    # ── PHASE 1: Generate (only when button clicked) ──
+    if run_btn:
+        if not question.strip():
+            st.warning("Please enter a question.")
+        else:
+            intent     = detect_intent(question)
+            start_date, end_date = parse_date_range(question)
+
+            with st.spinner("Fetching your data..."):
+                try:
+                    data = fetch_data(hotel, start_date, end_date, intent)
+                except Exception as e:
+                    st.error(f"Database error: {e}")
+                    st.stop()
+
+            t      = data["totals"].iloc[0] if not data["totals"].empty else {}
+            th     = float(t.get("total_hours", 0))
+            tot    = float(t.get("total_ot", 0))
+            rp     = float(t.get("reg_pay", 0))
+            op     = float(t.get("ot_pay", 0))
+            tc     = rp + op
+            emp    = int(t.get("employees", 0))
+            ot_pct = (tot / th * 100) if th else 0
+
+            with st.spinner("Generating executive summary..."):
+                try:
+                    prompt  = build_prompt(hotel, start_date, end_date,
+                                          question, intent, data)
+                    summary = call_groq(prompt)
+                except Exception as e:
+                    st.error(f"AI error: {e}")
+                    st.stop()
+
+            # Persist everything — survives any subsequent button click
+            st.session_state["aipilot_last_result"] = {
+                "hotel": hotel, "question": question,
+                "start": start_date, "end": end_date,
+                "summary": summary, "data": data,
+                "th": th, "tot": tot, "tc": tc,
+                "op": op, "emp": emp, "ot_pct": ot_pct,
+                "intent": intent,
+            }
+
+    # ── PHASE 2: Display (always, if results exist in session state) ──
+    r = st.session_state.get("aipilot_last_result")
+
+    if not r:
+        # No results yet — show placeholder
         st.markdown("""
         <div style="background:linear-gradient(135deg,#faf5ff,#f0f4ff);
                     border:1px solid #e9d5ff;border-radius:14px;
@@ -1252,13 +1299,17 @@ def render_aipilot(hotel: str):
         </div>""", unsafe_allow_html=True)
         return
 
-    if not question.strip():
-        st.warning("Please enter a question.")
-        return
+    # Unpack stored result
+    summary    = r["summary"]
+    data       = r["data"]
+    intent     = r["intent"]
+    start_date = r["start"]
+    end_date   = r["end"]
+    th, tot, tc, op, emp, ot_pct = (
+        r["th"], r["tot"], r["tc"], r["op"], r["emp"], r["ot_pct"]
+    )
 
-    intent     = detect_intent(question)
-    start_date, end_date = parse_date_range(question)
-
+    # Period / intent tag
     st.markdown(
         f'<span style="font-size:12px;color:#888;">Period: '
         f'<b>{start_date.strftime("%b %d")} – {end_date.strftime("%b %d, %Y")}</b></span>'
@@ -1266,23 +1317,7 @@ def render_aipilot(hotel: str):
         unsafe_allow_html=True,
     )
 
-    with st.spinner("Fetching your data..."):
-        try:
-            data = fetch_data(hotel, start_date, end_date, intent)
-        except Exception as e:
-            st.error(f"Database error: {e}")
-            return
-
     # ── KPI Pills ──
-    t   = data["totals"].iloc[0] if not data["totals"].empty else {}
-    th  = float(t.get("total_hours", 0))
-    tot = float(t.get("total_ot", 0))
-    rp  = float(t.get("reg_pay", 0))
-    op  = float(t.get("ot_pay", 0))
-    tc  = rp + op
-    emp = int(t.get("employees", 0))
-    ot_pct = (tot / th * 100) if th else 0
-
     if th > 0:
         st.markdown(f"""
         <div style="display:flex;flex-wrap:wrap;gap:0;margin:14px 0 6px;">
@@ -1295,24 +1330,6 @@ def render_aipilot(hotel: str):
         """, unsafe_allow_html=True)
 
     # ── AI Summary ──
-    with st.spinner("Generating executive summary..."):
-        try:
-            prompt  = build_prompt(hotel, start_date, end_date, question, intent, data)
-            summary = call_groq(prompt)
-        except Exception as e:
-            st.error(f"AI error: {e}")
-            return
-
-    # Store in session state for email button
-    st.session_state["aipilot_last_result"] = {
-        "hotel": hotel, "question": question,
-        "start": start_date, "end": end_date,
-        "summary": summary, "data": data,
-        "th": th, "tot": tot, "tc": tc,
-        "op": op, "emp": emp, "ot_pct": ot_pct,
-        "intent": intent,
-    }
-
     st.markdown(
         '<div style="display:flex;align-items:center;gap:10px;margin-top:18px;">'
         '<span style="font-size:16px;font-weight:700;color:#1a1a2e;">Executive Summary</span>'
@@ -1368,23 +1385,19 @@ def render_aipilot(hotel: str):
         if not raw_addrs:
             st.warning("Please enter at least one recipient email address.")
         else:
-            r = st.session_state.get("aipilot_last_result", {})
-            if not r:
-                st.warning("Generate a report first before sending.")
+            with st.spinner("Building and sending email..."):
+                ok, msg = send_aipilot_email(
+                    recipients=raw_addrs,
+                    hotel=r["hotel"],
+                    question=r["question"],
+                    start=r["start"],
+                    end=r["end"],
+                    summary=r["summary"],
+                    data=r["data"],
+                    th=r["th"], tot=r["tot"], tc=r["tc"],
+                    op=r["op"], emp=r["emp"], ot_pct=r["ot_pct"],
+                )
+            if ok:
+                st.success(f"✅ {msg}")
             else:
-                with st.spinner("Building and sending email..."):
-                    ok, msg = send_aipilot_email(
-                        recipients=raw_addrs,
-                        hotel=r["hotel"],
-                        question=r["question"],
-                        start=r["start"],
-                        end=r["end"],
-                        summary=r["summary"],
-                        data=r["data"],
-                        th=r["th"], tot=r["tot"], tc=r["tc"],
-                        op=r["op"], emp=r["emp"], ot_pct=r["ot_pct"],
-                    )
-                if ok:
-                    st.success(f"✅ {msg}")
-                else:
-                    st.error(f"❌ {msg}")
+                st.error(f"❌ {msg}")

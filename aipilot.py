@@ -1,19 +1,34 @@
 """
 aipilot.py — AI-powered labor intelligence for LaborPilot.
-Features: intent detection, suggestion chips, rich data fetching,
-question-focused prompts, table-aware response rendering.
+Features: intent detection, rich data fetching,
+question-focused prompts, table-aware response rendering, email export.
 """
 
 import os
 import re
+import io
+import base64
+import smtplib
+import ssl
+import textwrap
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 from datetime import date, timedelta
 from groq import Groq
 from sqlalchemy import text
 from db import ENGINE
+
+EMAIL_SENDER   = "alfredo1998x@gmail.com"
+EMAIL_PASSWORD = "iqry ajnp zvuo yeuq"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -730,6 +745,383 @@ def render_charts(intent: str, data: dict):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# EMAIL UTILITIES
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _df_to_html(df: pd.DataFrame, title: str = "") -> str:
+    """Convert a DataFrame to a styled HTML table string."""
+    if df is None or df.empty:
+        return ""
+    rows_html = ""
+    for i, (_, row) in enumerate(df.iterrows()):
+        bg = "#f9f8ff" if i % 2 == 0 else "#ffffff"
+        cells = "".join(
+            f'<td style="padding:7px 12px;border-bottom:1px solid #ede9fe;'
+            f'font-size:12px;color:#374151;">{v}</td>'
+            for v in row.values
+        )
+        rows_html += f'<tr style="background:{bg};">{cells}</tr>'
+    headers = "".join(
+        f'<th style="padding:8px 12px;background:#6366f1;color:#fff;'
+        f'font-size:12px;font-weight:700;text-align:left;">{c}</th>'
+        for c in df.columns
+    )
+    title_html = (
+        f'<p style="font-size:13px;font-weight:700;color:#4c1d95;'
+        f'margin:18px 0 6px;">{title}</p>' if title else ""
+    )
+    return (
+        title_html +
+        f'<table style="width:100%;border-collapse:collapse;border-radius:8px;'
+        f'overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.07);">'
+        f'<thead><tr>{headers}</tr></thead>'
+        f'<tbody>{rows_html}</tbody></table>'
+    )
+
+
+def _make_chart_pngs(intent: str, data: dict) -> list:
+    """
+    Generate up to 2 matplotlib chart PNGs for the email.
+    Returns list of (cid_name, png_bytes) tuples.
+    """
+    charts = []
+    dept   = data.get("dept", pd.DataFrame())
+
+    PURPLE  = "#6366f1"
+    RED     = "#ef4444"
+    BLUE    = "#3b82f6"
+    GREY    = "#e2e8f0"
+
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.spines.left": False,
+        "axes.grid": True,
+        "grid.color": "#f0f0f0",
+        "grid.linewidth": 0.7,
+    })
+
+    def _save(fig) -> bytes:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=130, bbox_inches="tight",
+                    facecolor="#ffffff")
+        plt.close(fig)
+        return buf.getvalue()
+
+    # Chart 1: hours by department (horizontal bar)
+    if not dept.empty and "department" in dept.columns:
+        top = dept.head(10).copy()
+        top = top.sort_values("total_hours")
+        fig, ax = plt.subplots(figsize=(6, max(2.5, len(top) * 0.4 + 0.5)))
+        colors  = [RED if h > 0 else PURPLE for h in top["ot_hours"]]
+        ax.barh(top["department"], top["total_hours"], color=PURPLE, height=0.55,
+                label="Regular Hours")
+        ax.barh(top["department"], top["ot_hours"], color=RED, height=0.55,
+                label="OT Hours", alpha=0.85)
+        ax.set_xlabel("Hours", fontsize=10)
+        ax.set_title("Hours by Department", fontsize=12, fontweight="bold",
+                     color="#1a1a2e", pad=10)
+        p_patch = mpatches.Patch(color=PURPLE, label="Total Hours")
+        r_patch = mpatches.Patch(color=RED, label="OT Hours")
+        ax.legend(handles=[p_patch, r_patch], fontsize=9, loc="lower right")
+        fig.tight_layout()
+        charts.append(("chart_dept", _save(fig)))
+
+    # Chart 2a: OT by employee (if available)
+    emp_ot = data.get("emp_ot", pd.DataFrame())
+    if not emp_ot.empty and "ot_hours" in emp_ot.columns:
+        top_ot = emp_ot[emp_ot["ot_hours"] > 0].nlargest(8, "ot_hours")
+        if not top_ot.empty:
+            fig, ax = plt.subplots(figsize=(6, max(2.5, len(top_ot) * 0.4 + 0.5)))
+            vals = top_ot["ot_hours"].values
+            names = top_ot["name"].values
+            clrs = [RED if v >= 8 else "#f97316" for v in vals]
+            ax.barh(names, vals, color=clrs, height=0.55)
+            ax.set_xlabel("OT Hours", fontsize=10)
+            ax.set_title("OT Hours by Employee", fontsize=12, fontweight="bold",
+                         color="#1a1a2e", pad=10)
+            ax.axvline(x=8, color="#6b7280", linewidth=1, linestyle="--",
+                       label="8h mark")
+            ax.legend(fontsize=9)
+            ax.invert_yaxis()
+            fig.tight_layout()
+            charts.append(("chart_emp_ot", _save(fig)))
+            return charts
+
+    # Chart 2b: daily cost trend (if available)
+    daily = data.get("daily", pd.DataFrame())
+    if not daily.empty and "reg_pay" in daily.columns:
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.fill_between(range(len(daily)), daily["reg_pay"], color=BLUE,
+                        alpha=0.3, label="Regular Pay")
+        ax.plot(range(len(daily)), daily["reg_pay"], color=BLUE, linewidth=1.5)
+        ax.fill_between(range(len(daily)), daily["ot_pay"], color=RED,
+                        alpha=0.3, label="OT Pay")
+        ax.plot(range(len(daily)), daily["ot_pay"], color=RED, linewidth=1.5)
+        tick_step = max(1, len(daily) // 7)
+        ax.set_xticks(range(0, len(daily), tick_step))
+        ax.set_xticklabels(
+            [str(d)[:10] for d in daily["date"].iloc[::tick_step]],
+            rotation=30, ha="right", fontsize=8)
+        ax.set_ylabel("Cost ($)", fontsize=10)
+        ax.set_title("Daily Labor Cost Trend", fontsize=12, fontweight="bold",
+                     color="#1a1a2e", pad=10)
+        ax.legend(fontsize=9)
+        fig.tight_layout()
+        charts.append(("chart_daily", _save(fig)))
+
+    return charts
+
+
+def build_email_html(hotel: str, question: str,
+                     start: date, end: date,
+                     summary: str, data: dict,
+                     th: float, tot: float, tc: float,
+                     op: float, emp: int, ot_pct: float,
+                     chart_cids: list) -> str:
+    """Build full HTML email body."""
+    period = f"{start.strftime('%B %d')} – {end.strftime('%B %d, %Y')}"
+    today  = date.today().strftime("%B %d, %Y")
+
+    # KPI pills
+    kpi_html = f"""
+    <table style="border-collapse:collapse;margin:0 0 20px;">
+      <tr>
+        <td style="padding:10px 18px;background:#f5f3ff;border:1px solid #ddd6fe;
+                   border-radius:8px;text-align:center;margin:4px;">
+          <div style="font-size:22px;font-weight:800;color:#6366f1;">{th:,.0f}</div>
+          <div style="font-size:11px;color:#6b7280;">Total Hours</div>
+        </td>
+        <td style="width:8px;"></td>
+        <td style="padding:10px 18px;background:#fff5f5;border:1px solid #fecaca;
+                   border-radius:8px;text-align:center;">
+          <div style="font-size:22px;font-weight:800;color:#ef4444;">{tot:,.1f}</div>
+          <div style="font-size:11px;color:#6b7280;">OT Hours ({ot_pct:.1f}%)</div>
+        </td>
+        <td style="width:8px;"></td>
+        <td style="padding:10px 18px;background:#f0fdf4;border:1px solid #bbf7d0;
+                   border-radius:8px;text-align:center;">
+          <div style="font-size:22px;font-weight:800;color:#16a34a;">${tc:,.0f}</div>
+          <div style="font-size:11px;color:#6b7280;">Total Labor Cost</div>
+        </td>
+        <td style="width:8px;"></td>
+        <td style="padding:10px 18px;background:#fff7ed;border:1px solid #fed7aa;
+                   border-radius:8px;text-align:center;">
+          <div style="font-size:22px;font-weight:800;color:#ea580c;">${op:,.0f}</div>
+          <div style="font-size:11px;color:#6b7280;">OT Pay</div>
+        </td>
+        <td style="width:8px;"></td>
+        <td style="padding:10px 18px;background:#f0f9ff;border:1px solid #bae6fd;
+                   border-radius:8px;text-align:center;">
+          <div style="font-size:22px;font-weight:800;color:#0284c7;">{emp}</div>
+          <div style="font-size:11px;color:#6b7280;">Employees</div>
+        </td>
+      </tr>
+    </table>"""
+
+    # AI summary (preserve line breaks)
+    summary_lines = summary.strip().splitlines()
+    summary_html  = "".join(
+        f'<p style="margin:0 0 8px;font-size:14px;line-height:1.75;color:#1f2937;">{l}</p>'
+        if l.strip() else '<div style="height:6px;"></div>'
+        for l in summary_lines
+    )
+
+    # Data tables
+    table_labels = [
+        ("Department Breakdown", "dept"),
+        ("Employee Detail", "emp_ot"),
+        ("Position Breakdown", "position"),
+        ("OT Risk", "ot_risk"),
+        ("Schedule", "schedule"),
+        ("Headcount by Day", "headcount_daily"),
+    ]
+    tables_html = ""
+    for label, key in table_labels:
+        df = data.get(key)
+        if df is not None and not df.empty:
+            tables_html += _df_to_html(df.head(30), title=label)
+
+    # Chart images
+    charts_html = ""
+    for cid, _ in chart_cids:
+        charts_html += (
+            f'<img src="cid:{cid}" style="max-width:100%;border-radius:10px;'
+            f'margin:8px 0 16px;box-shadow:0 2px 10px rgba(0,0,0,.08);" /><br/>'
+        )
+
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0"
+         style="background:#f3f4f6;padding:30px 0;">
+    <tr><td align="center">
+      <table width="640" cellpadding="0" cellspacing="0"
+             style="background:#ffffff;border-radius:14px;
+                    box-shadow:0 4px 24px rgba(0,0,0,.08);overflow:hidden;">
+
+        <!-- Header -->
+        <tr>
+          <td style="background:linear-gradient(135deg,#6366f1,#a855f7);
+                     padding:28px 32px;">
+            <table><tr>
+              <td style="padding-right:12px;">
+                <table cellspacing="3"><tr>
+                  <td style="width:14px;height:14px;background:#fff;border-radius:3px;opacity:.9;"></td>
+                  <td style="width:14px;height:14px;background:#ff4444;border-radius:3px;"></td>
+                </tr><tr>
+                  <td style="width:14px;height:14px;background:#fff;border-radius:3px;opacity:.9;"></td>
+                  <td style="width:14px;height:14px;background:#fff;border-radius:3px;opacity:.9;"></td>
+                </tr></table>
+              </td>
+              <td>
+                <div style="font-size:22px;font-weight:800;color:#fff;
+                            letter-spacing:-.5px;">AIPilot</div>
+                <div style="font-size:12px;color:rgba(255,255,255,.75);
+                            margin-top:2px;">Labor Intelligence Report</div>
+              </td>
+            </tr></table>
+          </td>
+        </tr>
+
+        <!-- Meta bar -->
+        <tr>
+          <td style="background:#faf5ff;padding:12px 32px;
+                     border-bottom:1px solid #ede9fe;">
+            <span style="font-size:12px;color:#6b7280;">
+              <strong style="color:#4c1d95;">Hotel:</strong> {hotel} &nbsp;·&nbsp;
+              <strong style="color:#4c1d95;">Period:</strong> {period} &nbsp;·&nbsp;
+              <strong style="color:#4c1d95;">Generated:</strong> {today}
+            </span>
+          </td>
+        </tr>
+
+        <!-- Question -->
+        <tr>
+          <td style="padding:20px 32px 4px;">
+            <div style="background:#f5f3ff;border-left:4px solid #6366f1;
+                        border-radius:0 8px 8px 0;padding:10px 16px;">
+              <span style="font-size:11px;font-weight:700;color:#7c3aed;
+                           text-transform:uppercase;letter-spacing:.5px;">Question</span>
+              <div style="font-size:14px;color:#1f2937;margin-top:4px;">
+                {question}
+              </div>
+            </div>
+          </td>
+        </tr>
+
+        <!-- KPIs -->
+        <tr><td style="padding:20px 32px 0;">{kpi_html}</td></tr>
+
+        <!-- AI Summary -->
+        <tr>
+          <td style="padding:0 32px 10px;">
+            <div style="font-size:15px;font-weight:700;color:#1a1a2e;
+                        margin-bottom:10px;">
+              ✦ Executive Summary
+              <span style="font-size:11px;font-weight:600;
+                           background:linear-gradient(135deg,#6366f1,#a855f7);
+                           color:#fff;padding:2px 9px;border-radius:20px;
+                           margin-left:8px;">AI · Llama 3.3 70B</span>
+            </div>
+            <div style="background:#f8f9ff;border:1px solid #e0e4f0;
+                        border-left:4px solid #6366f1;border-radius:10px;
+                        padding:18px 20px;">
+              {summary_html}
+            </div>
+          </td>
+        </tr>
+
+        <!-- Charts -->
+        {f'<tr><td style="padding:10px 32px 0;"><div style="font-size:15px;font-weight:700;color:#1a1a2e;margin-bottom:10px;">Supporting Charts</div>{charts_html}</td></tr>' if charts_html else ''}
+
+        <!-- Tables -->
+        {f'<tr><td style="padding:10px 32px 0;"><div style="font-size:15px;font-weight:700;color:#1a1a2e;margin-bottom:6px;">Data Tables</div>{tables_html}</td></tr>' if tables_html else ''}
+
+        <!-- Footer -->
+        <tr>
+          <td style="background:#f9fafb;border-top:1px solid #e5e7eb;
+                     padding:18px 32px;text-align:center;">
+            <span style="font-size:11px;color:#9ca3af;">
+              Sent by <strong>LaborPilot AIPilot</strong> &nbsp;·&nbsp;
+              For internal use only &nbsp;·&nbsp;
+              Log in to view interactive charts
+            </span>
+          </td>
+        </tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def send_aipilot_email(recipients: list, hotel: str, question: str,
+                       start: date, end: date, summary: str, data: dict,
+                       th: float, tot: float, tc: float,
+                       op: float, emp: int, ot_pct: float) -> tuple:
+    """
+    Build and send the AIPilot report email.
+    Returns (success: bool, message: str).
+    """
+    try:
+        period    = f"{start.strftime('%b %d')} – {end.strftime('%b %d, %Y')}"
+        subject   = f"AIPilot Labor Insight — {hotel} — {period}"
+
+        chart_cids = _make_chart_pngs(
+            st.session_state.get("aipilot_last_intent", "general"), data
+        )
+
+        html_body = build_email_html(
+            hotel, question, start, end, summary, data,
+            th, tot, tc, op, emp, ot_pct, chart_cids
+        )
+
+        # Build MIME message
+        msg = MIMEMultipart("related")
+        msg["From"]    = EMAIL_SENDER
+        msg["To"]      = ", ".join(recipients)
+        msg["Subject"] = subject
+
+        alt = MIMEMultipart("alternative")
+        # Plain text fallback
+        plain = (
+            f"AIPilot Labor Report — {hotel}\n"
+            f"Period: {period}\n\n"
+            f"Question: {question}\n\n"
+            f"=== KEY METRICS ===\n"
+            f"Total Hours: {th:,.0f}h  |  OT Hours: {tot:,.1f}h ({ot_pct:.1f}%)\n"
+            f"Total Cost: ${tc:,.2f}  |  OT Pay: ${op:,.2f}  |  Employees: {emp}\n\n"
+            f"=== EXECUTIVE SUMMARY ===\n{summary}\n\n"
+            f"Log into LaborPilot for interactive charts and full analytics."
+        )
+        alt.attach(MIMEText(plain, "plain"))
+        alt.attach(MIMEText(html_body, "html"))
+        msg.attach(alt)
+
+        # Attach chart images with CIDs
+        for cid, png_bytes in chart_cids:
+            img_part = MIMEImage(png_bytes, _subtype="png")
+            img_part.add_header("Content-ID", f"<{cid}>")
+            img_part.add_header("Content-Disposition", "inline",
+                                filename=f"{cid}.png")
+            msg.attach(img_part)
+
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as smtp:
+            smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            smtp.sendmail(EMAIL_SENDER, recipients, msg.as_string())
+
+        return True, f"Report sent to {', '.join(recipients)}"
+
+    except Exception as e:
+        return False, f"Failed to send: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN PAGE
 # ─────────────────────────────────────────────────────────────────────────────
 def render_aipilot(hotel: str):
@@ -911,6 +1303,16 @@ def render_aipilot(hotel: str):
             st.error(f"AI error: {e}")
             return
 
+    # Store in session state for email button
+    st.session_state["aipilot_last_result"] = {
+        "hotel": hotel, "question": question,
+        "start": start_date, "end": end_date,
+        "summary": summary, "data": data,
+        "th": th, "tot": tot, "tc": tc,
+        "op": op, "emp": emp, "ot_pct": ot_pct,
+        "intent": intent,
+    }
+
     st.markdown(
         '<div style="display:flex;align-items:center;gap:10px;margin-top:18px;">'
         '<span style="font-size:16px;font-weight:700;color:#1a1a2e;">Executive Summary</span>'
@@ -936,3 +1338,53 @@ def render_aipilot(hotel: str):
             if df is not None and not df.empty:
                 st.markdown(f"**{label}**")
                 st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # ── Email Report Section ──
+    st.markdown("---")
+    st.markdown("""
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+        <span style="font-size:20px;">✉️</span>
+        <span style="font-size:15px;font-weight:700;color:#1a1a2e;">Email This Report</span>
+    </div>
+    <p style="font-size:13px;color:#64748b;margin:0 0 14px;">
+        Sends the executive summary, KPI metrics, data tables, and supporting charts
+        directly to any email address.
+    </p>
+    """, unsafe_allow_html=True)
+
+    email_input = st.text_input(
+        "Recipient email address(es)",
+        placeholder="manager@hotel.com, gm@hotel.com",
+        key="aipilot_email_to",
+        label_visibility="collapsed",
+    )
+
+    send_col, _ = st.columns([1, 3])
+    with send_col:
+        send_clicked = st.button("✉️ Send Report", key="aipilot_send_email")
+
+    if send_clicked:
+        raw_addrs = [e.strip() for e in email_input.split(",") if e.strip()]
+        if not raw_addrs:
+            st.warning("Please enter at least one recipient email address.")
+        else:
+            r = st.session_state.get("aipilot_last_result", {})
+            if not r:
+                st.warning("Generate a report first before sending.")
+            else:
+                with st.spinner("Building and sending email..."):
+                    ok, msg = send_aipilot_email(
+                        recipients=raw_addrs,
+                        hotel=r["hotel"],
+                        question=r["question"],
+                        start=r["start"],
+                        end=r["end"],
+                        summary=r["summary"],
+                        data=r["data"],
+                        th=r["th"], tot=r["tot"], tc=r["tc"],
+                        op=r["op"], emp=r["emp"], ot_pct=r["ot_pct"],
+                    )
+                if ok:
+                    st.success(f"✅ {msg}")
+                else:
+                    st.error(f"❌ {msg}")

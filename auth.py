@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 from sqlalchemy.orm import Session
 import bcrypt as _bcrypt
+import os
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from database import SessionLocal
@@ -32,7 +33,13 @@ SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 SMTP_USERNAME = "your_email@gmail.com"
 SMTP_PASSWORD = "your_app_password"
-RESET_URL_BASE = "http://localhost:8501/reset-password"
+
+# Build the reset URL base from the Replit public domain (or localhost fallback)
+_replit_domain = os.environ.get("REPLIT_DEV_DOMAIN", "")
+if _replit_domain:
+    RESET_URL_BASE = f"https://{_replit_domain}/"
+else:
+    RESET_URL_BASE = "http://localhost:5000/"
 
 # ────────────────
 #  DB SESSION

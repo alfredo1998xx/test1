@@ -1,7 +1,7 @@
 """
-aipilot.py — AI-powered labor intelligence page for LaborPilot.
-Detects the intent of the question, fetches the right data, builds a
-focused executive prompt, and shows relevant charts.
+aipilot.py — AI-powered labor intelligence for LaborPilot.
+Features: intent detection, suggestion chips, rich data fetching,
+question-focused prompts, table-aware response rendering.
 """
 
 import os
@@ -17,42 +17,66 @@ from db import ENGINE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. INTENT DETECTION
+# SUGGESTION CHIPS
 # ─────────────────────────────────────────────────────────────────────────────
-INTENT_KEYWORDS = {
-    "ot":         ["overtime", "ot ", "over time", "ot hours", "ot pay", "ot cost"],
-    "risk":       ["risk", "at risk", "approaching", "close to 40", "near 40", "threshold", "danger"],
-    "schedule":   ["schedule", "scheduling", "mockup", "mock up", "who is working", "who's working",
-                   "shift", "shifts", "coverage", "staffing", "staff this", "headcount"],
-    "cost":       ["cost", "pay", "payroll", "spend", "spending", "budget", "wage", "salary", "expense"],
-    "department": ["department", "dept", "housekeeping", "front desk", "food", "maintenance", "engineering"],
-    "employee":   ["employee", "staff", "worker", "who worked", "team member"],
+SUGGESTIONS = [
+    "What was our overtime last week?",
+    "Is anyone at OT risk this week?",
+    "Which department had the highest labor cost this month?",
+    "Create a mockup schedule for this week",
+    "Show me YTD hours and cost by department",
+    "Who are our top OT earners this month?",
+    "Compare this week's labor cost to last week",
+    "What is our labor cost per occupied room this month?",
+    "Show me hours by position this month",
+    "Which employees worked the most hours last month?",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INTENT DETECTION
+# ─────────────────────────────────────────────────────────────────────────────
+INTENT_MAP = {
+    "ot":         ["overtime", "ot hours", "ot pay", "over time", "time and a half"],
+    "risk":       ["risk", "at risk", "approaching 40", "close to 40", "near 40", "threshold"],
+    "schedule":   ["schedule", "scheduling", "mockup", "mock-up", "who is working",
+                   "who's working", "shift", "shifts", "staffing", "coverage"],
+    "cost":       ["cost", "payroll", "spend", "spending", "budget", "wage", "salary",
+                   "expense", "pay"],
+    "comparison": ["compare", "comparison", "vs ", "versus", "week over week",
+                   "last week vs", "previous", "how does"],
+    "position":   ["position", "role", "job title", "which position", "by position"],
+    "efficiency": ["per room", "per occupied", "efficiency", "labor ratio", "cpor",
+                   "cost per room"],
+    "employee":   ["employee", "staff", "worker", "who worked", "who has the most",
+                   "top earner", "earner"],
+    "headcount":  ["headcount", "how many employees", "how many people", "staffing level"],
+    "department": ["department", "dept", "housekeeping", "front desk", "food",
+                   "maintenance", "engineering", "by department"],
 }
 
 def detect_intent(question: str) -> str:
     q = question.lower()
-    for intent, keywords in INTENT_KEYWORDS.items():
+    for intent, keywords in INTENT_MAP.items():
         if any(kw in q for kw in keywords):
             return intent
     return "general"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. DATE RANGE PARSING
+# DATE RANGE PARSING
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_date_range(question: str):
     today = date.today()
     q = question.lower()
 
     if "yesterday" in q:
-        s = today - timedelta(days=1)
-        return s, s
+        s = today - timedelta(days=1); return s, s
     if "last week" in q or "previous week" in q:
         s = today - timedelta(days=today.weekday() + 7)
         return s, s + timedelta(days=6)
     if "this week" in q or "current week" in q:
-        s = today - timedelta(days=today.weekday())
-        return s, today
+        return today - timedelta(days=today.weekday()), today
     if "next week" in q:
         s = today + timedelta(days=7 - today.weekday())
         return s, s + timedelta(days=6)
@@ -70,12 +94,18 @@ def parse_date_range(question: str):
         return today - timedelta(days=29), today
     if "ytd" in q or "year to date" in q or "this year" in q:
         return today.replace(month=1, day=1), today
-    # Default
-    return today - timedelta(days=29), today
+    if "last quarter" in q:
+        m = today.month
+        q_start_month = ((m - 1) // 3) * 3 + 1 - 3
+        if q_start_month <= 0: q_start_month += 12
+        s = today.replace(month=q_start_month, day=1)
+        e = (today.replace(month=((q_start_month - 1 + 3) % 12) + 1, day=1) - timedelta(days=1))
+        return s, e
+    return today - timedelta(days=29), today   # default: last 30 days
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. DATA FETCHING — targeted by intent
+# DATA FETCHING
 # ─────────────────────────────────────────────────────────────────────────────
 def _q(sql: str, params: dict) -> pd.DataFrame:
     with ENGINE.connect() as conn:
@@ -83,81 +113,116 @@ def _q(sql: str, params: dict) -> pd.DataFrame:
 
 
 def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
-    p = {"hotel": hotel, "start": str(start), "end": str(end)}
+    p  = {"hotel": hotel, "start": str(start), "end": str(end)}
+    today = date.today()
     data = {}
 
-    # ── Always fetch: totals + dept breakdown ──
+    # ── Always: totals ──
     data["totals"] = _q("""
         SELECT COALESCE(SUM(a.hours),0) total_hours,
                COALESCE(SUM(a.ot_hours),0) total_ot,
-               COALESCE(SUM(a.reg_pay),0) reg_pay,
-               COALESCE(SUM(a.ot_pay),0) ot_pay,
-               COUNT(DISTINCT a.emp_id) employees
-        FROM actual a WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
+               COALESCE(SUM(a.reg_pay),0)  reg_pay,
+               COALESCE(SUM(a.ot_pay),0)   ot_pay,
+               COUNT(DISTINCT a.emp_id)     employees
+        FROM actual a
+        WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
     """, p)
 
+    # ── Always: department breakdown ──
     data["dept"] = _q("""
         SELECT d.name department,
-               COALESCE(SUM(a.hours),0) total_hours,
+               COALESCE(SUM(a.hours),0)   total_hours,
                COALESCE(SUM(a.ot_hours),0) ot_hours,
                COALESCE(SUM(a.reg_pay),0) reg_pay,
-               COALESCE(SUM(a.ot_pay),0) ot_pay
+               COALESCE(SUM(a.ot_pay),0)  ot_pay,
+               COUNT(DISTINCT a.emp_id)   employees
         FROM actual a
         JOIN positions pos ON pos.id=a.position_id
-        JOIN departments d ON d.id=pos.department_id
+        JOIN departments d  ON d.id=pos.department_id
         WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
         GROUP BY d.name ORDER BY total_hours DESC
     """, p)
 
-    # ── OT / Risk: per-employee OT detail ──
-    if intent in ("ot", "risk", "employee", "general"):
+    # ── OT / Employee detail ──
+    if intent in ("ot", "employee", "general", "headcount", "comparison"):
         data["emp_ot"] = _q("""
             SELECT e.name, e.department,
-                   COALESCE(SUM(a.hours),0) total_hours,
+                   COALESCE(SUM(a.hours),0)    total_hours,
                    COALESCE(SUM(a.ot_hours),0) ot_hours,
-                   COALESCE(SUM(a.ot_pay),0) ot_pay
+                   COALESCE(SUM(a.ot_pay),0)   ot_pay,
+                   COALESCE(SUM(a.reg_pay),0)  reg_pay
             FROM actual a
             JOIN employee e ON e.id=a.emp_id AND e.hotel_name=:hotel
             WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
             GROUP BY e.name, e.department
-            HAVING SUM(a.ot_hours)>0 OR SUM(a.hours)>0
-            ORDER BY ot_hours DESC
+            ORDER BY total_hours DESC
         """, p)
 
-    # ── Schedule / Risk: this week's scheduled shifts ──
-    if intent in ("schedule", "risk", "general"):
-        data["schedule"] = _q("""
-            SELECT e.name, e.department, e.role position,
-                   s.day, s.shift_type
-            FROM schedule s
-            JOIN employee e ON e.id=s.emp_id AND e.hotel_name=:hotel
-            WHERE s.hotel_name=:hotel AND s.day BETWEEN :start AND :end
-              AND s.shift_type NOT IN ('OFF','off','Off')
-            ORDER BY s.day, e.department, e.name
+    # ── Position breakdown ──
+    if intent in ("position", "general", "cost", "department"):
+        data["position"] = _q("""
+            SELECT pos.name position, d.name department,
+                   COALESCE(SUM(a.hours),0)    total_hours,
+                   COALESCE(SUM(a.ot_hours),0) ot_hours,
+                   COALESCE(SUM(a.reg_pay+a.ot_pay),0) total_cost,
+                   COUNT(DISTINCT a.emp_id) employees
+            FROM actual a
+            JOIN positions pos ON pos.id=a.position_id
+            JOIN departments d  ON d.id=pos.department_id
+            WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
+            GROUP BY pos.name, d.name ORDER BY total_hours DESC LIMIT 20
         """, p)
 
-        # Headcount per day
-        data["headcount"] = _q("""
-            SELECT s.day, COUNT(DISTINCT s.emp_id) headcount,
-                   COUNT(*) shifts
-            FROM schedule s
-            WHERE s.hotel_name=:hotel AND s.day BETWEEN :start AND :end
-              AND s.shift_type NOT IN ('OFF','off','Off')
-            GROUP BY s.day ORDER BY s.day
+    # ── Daily trend ──
+    if intent in ("ot", "cost", "general", "comparison", "department"):
+        data["daily"] = _q("""
+            SELECT a.date,
+                   COALESCE(SUM(a.hours),0)    hours,
+                   COALESCE(SUM(a.ot_hours),0) ot_hours,
+                   COALESCE(SUM(a.reg_pay),0)  reg_pay,
+                   COALESCE(SUM(a.ot_pay),0)   ot_pay
+            FROM actual a
+            WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
+            GROUP BY a.date ORDER BY a.date
         """, p)
 
-    # ── Risk: projected OT — scheduled shifts this week + actual hours so far ──
+    # ── Comparison: fetch previous period too ──
+    if intent == "comparison":
+        period_days = (end - start).days + 1
+        prev_end   = start - timedelta(days=1)
+        prev_start = prev_end - timedelta(days=period_days - 1)
+        pp = {"hotel": hotel, "start": str(prev_start), "end": str(prev_end)}
+        data["prev_totals"] = _q("""
+            SELECT COALESCE(SUM(a.hours),0)  total_hours,
+                   COALESCE(SUM(a.ot_hours),0) total_ot,
+                   COALESCE(SUM(a.reg_pay+a.ot_pay),0) total_cost
+            FROM actual a
+            WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
+        """, pp)
+        data["prev_dept"] = _q("""
+            SELECT d.name department,
+                   COALESCE(SUM(a.hours),0)  total_hours,
+                   COALESCE(SUM(a.reg_pay+a.ot_pay),0) total_cost
+            FROM actual a
+            JOIN positions pos ON pos.id=a.position_id
+            JOIN departments d  ON d.id=pos.department_id
+            WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
+            GROUP BY d.name
+        """, pp)
+        data["prev_period"] = (prev_start, prev_end)
+
+    # ── OT Risk: this week's schedule + actual so far ──
     if intent == "risk":
-        today = date.today()
         week_start = today - timedelta(days=today.weekday())
         week_end   = week_start + timedelta(days=6)
-        rp = {"hotel": hotel, "ws": str(week_start), "we": str(week_end), "today": str(today)}
-
+        rp = {"hotel": hotel, "ws": str(week_start),
+              "we": str(week_end), "today": str(today)}
         data["ot_risk"] = _q("""
             SELECT e.name, e.department,
-                   COUNT(DISTINCT s.day) scheduled_days,
-                   COALESCE(SUM(a.hours),0) actual_hours_so_far,
-                   COUNT(DISTINCT s.day) * 8.0 projected_total
+                   COUNT(DISTINCT s.day)     scheduled_days,
+                   COUNT(DISTINCT s.day)*8.0 projected_hours,
+                   COALESCE(SUM(a.hours),0)  actual_so_far,
+                   e.hourly_rate
             FROM employee e
             LEFT JOIN schedule s ON s.emp_id=e.id AND s.hotel_name=:hotel
                 AND s.day BETWEEN :ws AND :we
@@ -165,231 +230,351 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
             LEFT JOIN actual a ON a.emp_id=e.id AND a.hotel_name=:hotel
                 AND a.date BETWEEN :ws AND :today
             WHERE e.hotel_name=:hotel
-            GROUP BY e.name, e.department
+            GROUP BY e.name, e.department, e.hourly_rate
             HAVING COUNT(DISTINCT s.day)>0
-            ORDER BY projected_total DESC
+            ORDER BY projected_hours DESC
         """, rp)
+        data["risk_week"] = (week_start, week_end)
 
-    # ── Schedule / Mockup: employee roster for AI to build a schedule ──
+    # ── Schedule: shifts in range ──
+    if intent in ("schedule", "risk", "headcount"):
+        data["schedule"] = _q("""
+            SELECT e.name employee, e.department, e.role position,
+                   s.day, s.shift_type
+            FROM schedule s
+            JOIN employee e ON e.id=s.emp_id AND e.hotel_name=:hotel
+            WHERE s.hotel_name=:hotel AND s.day BETWEEN :start AND :end
+              AND s.shift_type NOT IN ('OFF','off','Off')
+            ORDER BY s.day, e.department, e.name
+        """, p)
+        data["headcount_daily"] = _q("""
+            SELECT s.day, COUNT(DISTINCT s.emp_id) headcount
+            FROM schedule s
+            WHERE s.hotel_name=:hotel AND s.day BETWEEN :start AND :end
+              AND s.shift_type NOT IN ('OFF','off','Off')
+            GROUP BY s.day ORDER BY s.day
+        """, p)
+
+    # ── Efficiency: labor cost per occupied room ──
+    if intent == "efficiency":
+        data["rooms"] = _q("""
+            SELECT ra.date, COALESCE(SUM(ra.value),0) occupied_rooms
+            FROM room_actual ra
+            WHERE ra.hotel_name=:hotel AND ra.date BETWEEN :start AND :end
+              AND ra.kpi='Occupied Rooms'
+            GROUP BY ra.date ORDER BY ra.date
+        """, p)
+
+    # ── Schedule mockup: full employee roster ──
     if intent == "schedule":
-        data["employees"] = _q("""
+        data["roster"] = _q("""
             SELECT e.name, e.department, e.role position, e.emp_type
             FROM employee e WHERE e.hotel_name=:hotel
             ORDER BY e.department, e.name
-        """, p)
-
-    # ── Cost: daily cost trend ──
-    if intent in ("cost", "general"):
-        data["daily"] = _q("""
-            SELECT a.date,
-                   COALESCE(SUM(a.reg_pay),0) reg_pay,
-                   COALESCE(SUM(a.ot_pay),0) ot_pay,
-                   COALESCE(SUM(a.hours),0) hours
-            FROM actual a WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
-            GROUP BY a.date ORDER BY a.date
-        """, p)
-
-    # ── OT: daily OT trend ──
-    if intent == "ot":
-        data["daily_ot"] = _q("""
-            SELECT a.date,
-                   COALESCE(SUM(a.ot_hours),0) ot_hours,
-                   COALESCE(SUM(a.ot_pay),0) ot_pay,
-                   COALESCE(SUM(a.hours),0) total_hours
-            FROM actual a WHERE a.hotel_name=:hotel AND a.date BETWEEN :start AND :end
-            GROUP BY a.date ORDER BY a.date
         """, p)
 
     return data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. PROMPT BUILDER — question-focused, intent-aware
+# PROMPT BUILDER — question-focused
 # ─────────────────────────────────────────────────────────────────────────────
-def build_prompt(hotel: str, start: date, end: date, question: str,
-                 intent: str, data: dict) -> str:
-    today = date.today()
-    period = f"{start.strftime('%B %d, %Y')} — {end.strftime('%B %d, %Y')}"
-    days   = (end - start).days + 1
+def build_prompt(hotel: str, start: date, end: date,
+                 question: str, intent: str, data: dict) -> str:
+    today      = date.today()
+    period     = f"{start.strftime('%B %d')} — {end.strftime('%B %d, %Y')}"
+    days       = (end - start).days + 1
 
-    t = data["totals"].iloc[0] if not data["totals"].empty else {}
-    th   = float(t.get("total_hours", 0))
-    tot  = float(t.get("total_ot", 0))
-    rp   = float(t.get("reg_pay", 0))
-    op   = float(t.get("ot_pay", 0))
-    tc   = rp + op
-    emps = int(t.get("employees", 0))
+    t  = data["totals"].iloc[0] if not data["totals"].empty else {}
+    th  = float(t.get("total_hours", 0))
+    tot = float(t.get("total_ot", 0))
+    rp  = float(t.get("reg_pay", 0))
+    op  = float(t.get("ot_pay", 0))
+    tc  = rp + op
+    emp = int(t.get("employees", 0))
     ot_pct = (tot / th * 100) if th else 0
 
     dept_txt = data["dept"].to_string(index=False) if not data["dept"].empty else "No department data."
 
-    sections = [
-        f"You are an elite hotel labor analytics advisor. Your ONLY job right now is to answer this specific question:\n\n\"{question}\"\n",
-        f"HOTEL: {hotel}  |  PERIOD: {period} ({days} days)  |  TODAY: {today.strftime('%A, %B %d, %Y')}",
-        f"\n--- OVERALL METRICS ---",
-        f"Total Hours: {th:,.1f}   OT Hours: {tot:,.1f} ({ot_pct:.1f}%)   Employees: {emps}",
-        f"Regular Pay: ${rp:,.2f}   OT Pay: ${op:,.2f}   Total Cost: ${tc:,.2f}",
-        f"\n--- BY DEPARTMENT ---\n{dept_txt}",
+    lines = [
+        "You are an elite hotel labor analytics advisor. Your sole job right now is to directly answer:",
+        f'"{question}"',
+        "",
+        f"HOTEL: {hotel}   PERIOD: {period} ({days} days)   TODAY: {today.strftime('%A, %B %d, %Y')}",
+        "",
+        "=== OVERALL METRICS ===",
+        f"Total Hours: {th:,.1f}h  |  OT Hours: {tot:,.1f}h ({ot_pct:.1f}%)  |  "
+        f"Employees: {emp}  |  Total Labor Cost: ${tc:,.2f}  |  OT Pay: ${op:,.2f}",
+        "",
+        "=== DEPARTMENT BREAKDOWN ===",
+        dept_txt,
     ]
 
-    # Intent-specific data sections
+    # Intent-specific sections
     if intent == "ot" and "emp_ot" in data and not data["emp_ot"].empty:
-        sections.append(f"\n--- EMPLOYEE OT DETAIL ---\n{data['emp_ot'].to_string(index=False)}")
+        top_ot = data["emp_ot"].nlargest(10, "ot_hours")
+        lines += ["", "=== EMPLOYEE OT DETAIL (top 10 by OT) ===", top_ot.to_string(index=False)]
+
+    if intent == "employee" and "emp_ot" in data and not data["emp_ot"].empty:
+        lines += ["", "=== ALL EMPLOYEES (by hours worked) ===",
+                  data["emp_ot"].to_string(index=False)]
+
+    if intent == "position" and "position" in data and not data["position"].empty:
+        lines += ["", "=== POSITION BREAKDOWN ===", data["position"].to_string(index=False)]
 
     if intent == "risk" and "ot_risk" in data and not data["ot_risk"].empty:
+        ws, we = data.get("risk_week", (today, today))
         risk_df = data["ot_risk"]
-        at_risk = risk_df[risk_df["projected_total"] >= 36]
-        sections.append(f"\n--- OT RISK THIS WEEK (projected hours ≥ 36) ---\n{at_risk.to_string(index=False) if not at_risk.empty else 'No employees currently at OT risk.'}")
-        sections.append(f"\n--- ALL SCHEDULED EMPLOYEES THIS WEEK ---\n{risk_df.to_string(index=False)}")
+        at_risk = risk_df[risk_df["projected_hours"] >= 36]
+        lines += [
+            "",
+            f"=== OT RISK THIS WEEK ({ws.strftime('%b %d')} – {we.strftime('%b %d')}) ===",
+            "NOTE: projected_hours = scheduled_days × 8h",
+            risk_df.to_string(index=False),
+            "",
+            f"EMPLOYEES AT OR NEAR OT THRESHOLD (≥36h projected):",
+            at_risk.to_string(index=False) if not at_risk.empty else "None currently flagged.",
+        ]
 
     if intent == "schedule":
         if "schedule" in data and not data["schedule"].empty:
-            sections.append(f"\n--- CURRENT SCHEDULE DATA ---\n{data['schedule'].to_string(index=False)}")
-        if "employees" in data and not data["employees"].empty:
-            sections.append(f"\n--- EMPLOYEE ROSTER ---\n{data['employees'].to_string(index=False)}")
+            lines += ["", "=== CURRENT SCHEDULE DATA ===", data["schedule"].to_string(index=False)]
+        if "roster" in data and not data["roster"].empty:
+            lines += ["", "=== EMPLOYEE ROSTER (use to build mockup) ===",
+                      data["roster"].to_string(index=False)]
 
-    if intent in ("cost",) and "daily" in data and not data["daily"].empty:
-        sections.append(f"\n--- DAILY COST TREND ---\n{data['daily'].to_string(index=False)}")
+    if intent == "comparison":
+        pt = data.get("prev_totals")
+        pp = data.get("prev_period")
+        if pt is not None and not pt.empty and pp:
+            prev = pt.iloc[0]
+            lines += [
+                "",
+                f"=== PREVIOUS PERIOD ({pp[0].strftime('%b %d')} – {pp[1].strftime('%b %d')}) ===",
+                f"Hours: {float(prev.get('total_hours',0)):,.1f}h  |  "
+                f"OT: {float(prev.get('total_ot',0)):,.1f}h  |  "
+                f"Cost: ${float(prev.get('total_cost',0)):,.2f}",
+            ]
+            if "prev_dept" in data and not data["prev_dept"].empty:
+                lines += ["By dept:", data["prev_dept"].to_string(index=False)]
 
-    sections.append(f"""
---- YOUR RESPONSE RULES ---
-1. Answer the user's question DIRECTLY in the first sentence. Lead with the number.
-2. Write an executive-grade narrative (3–5 sentences max). CEO language: confident, clear, no jargon.
-3. Give exactly 3 "Key Takeaways" bullets — each with a specific number and an actionable implication.
-4. End with one "Recommendation" — a single decisive action for this week.
-5. If the question asks to create a schedule or suggest staffing — output a clean schedule table showing department, employee, and day/shift. Format it clearly.
-6. If there is no relevant data, say so directly in one sentence. Do not fabricate numbers.
-7. Keep the entire response under 350 words. No markdown headers — use natural line breaks.""")
+    if intent == "efficiency" and "rooms" in data and not data["rooms"].empty:
+        rooms_df = data["rooms"]
+        total_rooms = rooms_df["occupied_rooms"].sum()
+        cpor = tc / total_rooms if total_rooms else 0
+        lines += [
+            "", "=== ROOM OCCUPANCY DATA ===",
+            f"Total Occupied Room-Nights: {total_rooms:,.0f}",
+            f"Labor Cost Per Occupied Room (CPOR): ${cpor:,.2f}",
+            rooms_df.to_string(index=False),
+        ]
 
-    return "\n".join(sections)
+    if intent in ("cost", "general") and "daily" in data and not data["daily"].empty:
+        lines += ["", "=== DAILY TREND ===", data["daily"].to_string(index=False)]
+
+    lines += [
+        "",
+        "=== RESPONSE RULES ===",
+        "1. Answer the user's question DIRECTLY in your first sentence with the key number.",
+        "2. Write a concise executive narrative (3–5 sentences). CEO tone: confident, specific, no jargon.",
+        "3. Give exactly 3 'Key Takeaways' bullets — each with a real number and an actionable implication.",
+        "4. End with one 'Recommendation' — one decisive action for this week.",
+        "5. If the question asks to create or suggest a schedule — output a clean schedule table",
+        "   with columns: Department | Employee | Monday | Tuesday | Wednesday | Thursday | Friday | Saturday | Sunday.",
+        "   Use realistic 8-hour shift labels like '8am-4pm', '4pm-12am', 'OFF'.",
+        "6. For comparisons — show the before/after numbers and the percentage change.",
+        "7. For risk — name specific employees and their projected hours.",
+        "8. NEVER fabricate numbers. If data is absent, say so in one sentence.",
+        "9. Keep response under 450 words unless outputting a schedule table.",
+        "10. No markdown headers (##) — use natural spacing and the Key Takeaways / Recommendation labels.",
+    ]
+
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. GROQ API CALL
+# GROQ API
 # ─────────────────────────────────────────────────────────────────────────────
 def call_groq(prompt: str) -> str:
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
         return "⚠️ GROQ_API_KEY is not configured."
     client = Groq(api_key=api_key)
-    response = client.chat.completions.create(
+    resp = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.3,
-        max_tokens=800,
+        max_tokens=900,
     )
-    return response.choices[0].message.content.strip()
+    return resp.choices[0].message.content.strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. DYNAMIC CHARTS — based on intent
+# RESPONSE RENDERER — collapses whitespace, parses inline tables
+# ─────────────────────────────────────────────────────────────────────────────
+def table_md_to_df(table_text: str) -> pd.DataFrame:
+    """Convert a markdown table string to a DataFrame."""
+    lines = [l.strip() for l in table_text.splitlines()
+             if l.strip() and not re.match(r'^\|?\s*[-:]+[-| :]*\|?\s*$', l.strip())]
+    if not lines:
+        return pd.DataFrame()
+    headers = [h.strip() for h in lines[0].strip("|").split("|") if h.strip()]
+    rows = []
+    for line in lines[1:]:
+        cols = [c.strip() for c in line.strip("|").split("|")]
+        if cols:
+            rows.append(cols)
+    max_cols = max(len(r) for r in rows) if rows else len(headers)
+    headers  = (headers + [""] * max_cols)[:max_cols]
+    df = pd.DataFrame(rows, columns=headers)
+    return df
+
+
+def render_ai_response(raw: str):
+    """Split AI text into prose and markdown-table segments, render each properly."""
+    # Collapse 3+ blank lines → 2
+    cleaned = re.sub(r'\n{3,}', '\n\n', raw.strip())
+
+    lines     = cleaned.splitlines()
+    segments  = []
+    txt_buf   = []
+    tbl_buf   = []
+    in_table  = False
+
+    for line in lines:
+        is_table_row = bool(re.match(r'^\s*\|', line))
+        if is_table_row:
+            if not in_table:
+                if txt_buf:
+                    segments.append(("text", "\n".join(txt_buf)))
+                    txt_buf = []
+                in_table = True
+            tbl_buf.append(line)
+        else:
+            if in_table:
+                segments.append(("table", "\n".join(tbl_buf)))
+                tbl_buf = []
+                in_table = False
+            txt_buf.append(line)
+
+    if tbl_buf:
+        segments.append(("table", "\n".join(tbl_buf)))
+    if txt_buf:
+        segments.append(("text", "\n".join(txt_buf)))
+
+    for kind, content in segments:
+        if kind == "text" and content.strip():
+            st.markdown(
+                f'<div class="ai-card">{content}</div>',
+                unsafe_allow_html=True,
+            )
+        elif kind == "table":
+            df = table_md_to_df(content)
+            if not df.empty:
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DYNAMIC CHARTS
 # ─────────────────────────────────────────────────────────────────────────────
 def render_charts(intent: str, data: dict):
-    dept = data.get("dept", pd.DataFrame())
-    shown = False
+    dept    = data.get("dept", pd.DataFrame())
+    daily   = data.get("daily", pd.DataFrame())
+    emp_ot  = data.get("emp_ot", pd.DataFrame())
+    shown   = False
 
-    # ── OT intent ──
+    # ── OT ──
     if intent == "ot":
-        emp_ot = data.get("emp_ot", pd.DataFrame())
-        daily_ot = data.get("daily_ot", pd.DataFrame())
         c1, c2 = st.columns(2)
         with c1:
             if not emp_ot.empty:
-                fig = px.bar(emp_ot.head(10), x="ot_hours", y="name", orientation="h",
-                             color="ot_hours", color_continuous_scale=["#FFF9C4", "#FF5722"],
-                             title="Overtime Hours by Employee",
-                             labels={"ot_hours": "OT Hours", "name": ""},
-                             template="plotly_white")
-                fig.update_layout(yaxis=dict(autorange="reversed"), margin=dict(t=40, b=10), title_font_size=14)
-                st.plotly_chart(fig, use_container_width=True)
-                shown = True
+                top = emp_ot[emp_ot["ot_hours"] > 0].nlargest(10, "ot_hours")
+                if not top.empty:
+                    fig = px.bar(top, x="ot_hours", y="name", orientation="h",
+                                 color="ot_hours", color_continuous_scale=["#FFF9C4","#FF5722"],
+                                 title="OT Hours by Employee",
+                                 labels={"ot_hours":"OT Hours","name":""},
+                                 template="plotly_white")
+                    fig.update_layout(yaxis=dict(autorange="reversed"),
+                                      margin=dict(t=40,b=10), title_font_size=14)
+                    st.plotly_chart(fig, use_container_width=True); shown=True
         with c2:
-            if not daily_ot.empty:
+            if not daily.empty:
                 fig2 = go.Figure()
-                fig2.add_trace(go.Bar(x=daily_ot["date"], y=daily_ot["total_hours"],
+                fig2.add_trace(go.Bar(x=daily["date"], y=daily["hours"],
                                        name="Total Hours", marker_color="#90CAF9"))
-                fig2.add_trace(go.Bar(x=daily_ot["date"], y=daily_ot["ot_hours"],
+                fig2.add_trace(go.Bar(x=daily["date"], y=daily["ot_hours"],
                                        name="OT Hours", marker_color="#FF5722"))
                 fig2.update_layout(barmode="overlay", title="Daily Hours vs OT",
-                                   template="plotly_white", margin=dict(t=40, b=10),
-                                   title_font_size=14, legend=dict(orientation="h", y=1.1))
-                st.plotly_chart(fig2, use_container_width=True)
-                shown = True
+                                   template="plotly_white",
+                                   margin=dict(t=40,b=10), title_font_size=14,
+                                   legend=dict(orientation="h",y=1.1))
+                st.plotly_chart(fig2, use_container_width=True); shown=True
 
-        if not dept.empty:
-            fig3 = px.bar(dept, x="department", y=["total_hours", "ot_hours"],
-                          barmode="group", title="Hours vs OT by Department",
-                          labels={"value": "Hours", "department": ""},
-                          color_discrete_map={"total_hours": "#90CAF9", "ot_hours": "#FF5722"},
-                          template="plotly_white")
-            fig3.update_layout(margin=dict(t=40, b=10), title_font_size=14,
-                               legend=dict(title="", orientation="h", y=1.1))
-            fig3.for_each_trace(lambda t: t.update(name="Total Hours" if t.name == "total_hours" else "OT Hours"))
-            st.plotly_chart(fig3, use_container_width=True)
-            shown = True
-
-    # ── Risk intent ──
+    # ── Risk ──
     elif intent == "risk":
         risk_df = data.get("ot_risk", pd.DataFrame())
         if not risk_df.empty:
             risk_df = risk_df.copy()
-            risk_df["status"] = risk_df["projected_total"].apply(
-                lambda x: "At Risk (≥40h)" if x >= 40 else ("Approaching (≥36h)" if x >= 36 else "Safe")
-            )
-            color_map = {"At Risk (≥40h)": "#e53935", "Approaching (≥36h)": "#FF9800", "Safe": "#43A047"}
-            fig = px.bar(risk_df.sort_values("projected_total", ascending=True),
-                         x="projected_total", y="name", orientation="h",
+            risk_df["status"] = risk_df["projected_hours"].apply(
+                lambda x: "🔴 At Risk ≥40h" if x >= 40 else
+                          ("🟠 Approaching ≥36h" if x >= 36 else "🟢 Safe"))
+            color_map = {"🔴 At Risk ≥40h":"#e53935",
+                         "🟠 Approaching ≥36h":"#FF9800",
+                         "🟢 Safe":"#43A047"}
+            fig = px.bar(risk_df.sort_values("projected_hours"),
+                         x="projected_hours", y="name", orientation="h",
                          color="status", color_discrete_map=color_map,
-                         title="Projected Weekly Hours — OT Risk Assessment",
-                         labels={"projected_total": "Projected Hours", "name": ""},
+                         title="Projected Weekly Hours — OT Risk",
+                         labels={"projected_hours":"Projected Hours","name":""},
                          template="plotly_white")
             fig.add_vline(x=40, line_dash="dash", line_color="red",
-                          annotation_text="40h OT threshold", annotation_position="top right")
-            fig.update_layout(margin=dict(t=50, b=10), title_font_size=14,
-                              legend=dict(title="", orientation="h", y=1.12))
-            st.plotly_chart(fig, use_container_width=True)
-            shown = True
-
-        hc = data.get("headcount", pd.DataFrame())
+                          annotation_text="40h threshold")
+            fig.add_vline(x=36, line_dash="dot", line_color="orange",
+                          annotation_text="Warning")
+            fig.update_layout(margin=dict(t=50,b=10), title_font_size=14,
+                              legend=dict(title="",orientation="h",y=1.12))
+            st.plotly_chart(fig, use_container_width=True); shown=True
+        hc = data.get("headcount_daily", pd.DataFrame())
         if not hc.empty:
-            fig2 = px.bar(hc, x="day", y="headcount", title="Daily Headcount This Week",
-                          color="headcount", color_continuous_scale=["#E3F2FD", "#1565C0"],
-                          labels={"headcount": "Employees", "day": ""},
+            fig2 = px.bar(hc, x="day", y="headcount",
+                          title="Daily Headcount This Week",
+                          color="headcount",
+                          color_continuous_scale=["#E3F2FD","#1565C0"],
+                          labels={"headcount":"Employees","day":""},
                           template="plotly_white")
-            fig2.update_layout(margin=dict(t=40, b=10), title_font_size=14)
-            st.plotly_chart(fig2, use_container_width=True)
-            shown = True
+            fig2.update_layout(margin=dict(t=40,b=10), title_font_size=14)
+            st.plotly_chart(fig2, use_container_width=True); shown=True
 
-    # ── Schedule intent ──
-    elif intent == "schedule":
-        hc = data.get("headcount", pd.DataFrame())
-        sched = data.get("schedule", pd.DataFrame())
+    # ── Schedule / Headcount ──
+    elif intent in ("schedule","headcount"):
         c1, c2 = st.columns(2)
+        hc = data.get("headcount_daily", pd.DataFrame())
         with c1:
             if not hc.empty:
                 fig = px.bar(hc, x="day", y="headcount",
                              title="Scheduled Headcount by Day",
-                             color="headcount", color_continuous_scale=["#E8F5E9", "#2E7D32"],
-                             labels={"headcount": "Employees", "day": ""},
+                             color="headcount",
+                             color_continuous_scale=["#E8F5E9","#2E7D32"],
+                             labels={"headcount":"Employees","day":""},
                              template="plotly_white")
-                fig.update_layout(margin=dict(t=40, b=10), title_font_size=14)
-                st.plotly_chart(fig, use_container_width=True)
-                shown = True
+                fig.update_layout(margin=dict(t=40,b=10), title_font_size=14)
+                st.plotly_chart(fig, use_container_width=True); shown=True
         with c2:
+            sched = data.get("schedule", pd.DataFrame())
             if not sched.empty and "department" in sched.columns:
-                dept_day = sched.groupby(["department", "day"]).size().reset_index(name="count")
-                fig2 = px.bar(dept_day, x="day", y="count", color="department",
-                              title="Shifts by Department per Day", barmode="stack",
-                              labels={"count": "Shifts", "day": ""},
+                dd = sched.groupby(["department","day"]).size().reset_index(name="count")
+                fig2 = px.bar(dd, x="day", y="count", color="department",
+                              barmode="stack",
+                              title="Shifts by Department per Day",
+                              labels={"count":"Shifts","day":""},
                               template="plotly_white")
-                fig2.update_layout(margin=dict(t=40, b=10), title_font_size=14,
-                                   legend=dict(title="", orientation="h", y=1.12))
-                st.plotly_chart(fig2, use_container_width=True)
-                shown = True
+                fig2.update_layout(margin=dict(t=40,b=10), title_font_size=14,
+                                   legend=dict(title="",orientation="h",y=1.12))
+                st.plotly_chart(fig2, use_container_width=True); shown=True
 
-    # ── Cost intent ──
+    # ── Cost ──
     elif intent == "cost":
-        daily = data.get("daily", pd.DataFrame())
         c1, c2 = st.columns(2)
         with c1:
             if not daily.empty:
@@ -400,68 +585,152 @@ def render_charts(intent: str, data: dict):
                 fig.add_trace(go.Scatter(x=daily["date"], y=daily["ot_pay"],
                                           name="OT Pay", fill="tozeroy",
                                           line=dict(color="#FF5722")))
-                fig.update_layout(title="Daily Labor Cost Trend", template="plotly_white",
-                                  margin=dict(t=40, b=10), title_font_size=14,
-                                  legend=dict(orientation="h", y=1.1))
-                st.plotly_chart(fig, use_container_width=True)
-                shown = True
+                fig.update_layout(title="Daily Cost Trend", template="plotly_white",
+                                  margin=dict(t=40,b=10), title_font_size=14,
+                                  legend=dict(orientation="h",y=1.1))
+                st.plotly_chart(fig, use_container_width=True); shown=True
         with c2:
             if not dept.empty:
-                dept["total_cost"] = dept["reg_pay"] + dept["ot_pay"]
-                fig2 = px.pie(dept, names="department", values="total_cost",
+                dept2 = dept.copy()
+                dept2["total_cost"] = dept2["reg_pay"] + dept2["ot_pay"]
+                fig2 = px.pie(dept2, names="department", values="total_cost",
                               title="Cost Share by Department",
                               template="plotly_white",
                               color_discrete_sequence=px.colors.qualitative.Set2)
-                fig2.update_layout(margin=dict(t=40, b=10), title_font_size=14)
-                st.plotly_chart(fig2, use_container_width=True)
-                shown = True
+                fig2.update_layout(margin=dict(t=40,b=10), title_font_size=14)
+                st.plotly_chart(fig2, use_container_width=True); shown=True
 
-    # ── General / employee / department ──
+    # ── Comparison ──
+    elif intent == "comparison":
+        curr = data["dept"].copy() if not data["dept"].empty else pd.DataFrame()
+        prev = data.get("prev_dept", pd.DataFrame()).copy()
+        if not curr.empty:
+            curr["period"] = "Current"
+            prev2 = prev.copy() if not prev.empty else pd.DataFrame(columns=curr.columns)
+            if not prev2.empty:
+                prev2["period"] = "Previous"
+                combined = pd.concat([curr[["department","total_hours","period"]],
+                                      prev2[["department","total_hours","period"]]])
+                fig = px.bar(combined, x="department", y="total_hours",
+                             color="period", barmode="group",
+                             title="Hours: Current vs Previous Period",
+                             color_discrete_map={"Current":"#2196F3","Previous":"#90CAF9"},
+                             labels={"total_hours":"Hours","department":""},
+                             template="plotly_white")
+                fig.update_layout(margin=dict(t=40,b=10), title_font_size=14,
+                                  legend=dict(title="",orientation="h",y=1.1))
+                st.plotly_chart(fig, use_container_width=True); shown=True
+
+    # ── Position ──
+    elif intent == "position":
+        pos_df = data.get("position", pd.DataFrame())
+        if not pos_df.empty:
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = px.bar(pos_df.head(15), x="total_hours", y="position",
+                             orientation="h", color="department",
+                             title="Hours by Position (Top 15)",
+                             labels={"total_hours":"Hours","position":""},
+                             template="plotly_white")
+                fig.update_layout(yaxis=dict(autorange="reversed"),
+                                  margin=dict(t=40,b=10), title_font_size=14,
+                                  legend=dict(title="",orientation="h",y=1.12))
+                st.plotly_chart(fig, use_container_width=True); shown=True
+            with c2:
+                fig2 = px.bar(pos_df.head(15), x="total_cost", y="position",
+                              orientation="h", color="department",
+                              title="Cost by Position (Top 15)",
+                              labels={"total_cost":"Cost ($)","position":""},
+                              template="plotly_white")
+                fig2.update_layout(yaxis=dict(autorange="reversed"),
+                                   margin=dict(t=40,b=10), title_font_size=14,
+                                   legend=dict(title="",orientation="h",y=1.12))
+                st.plotly_chart(fig2, use_container_width=True); shown=True
+
+    # ── Efficiency ──
+    elif intent == "efficiency":
+        rooms_df = data.get("rooms", pd.DataFrame())
+        if not rooms_df.empty and not daily.empty:
+            merged = pd.merge(daily, rooms_df, left_on="date", right_on="date", how="left")
+            merged["total_cost"] = merged["reg_pay"] + merged["ot_pay"]
+            merged["cpor"] = merged.apply(
+                lambda r: r["total_cost"] / r["occupied_rooms"]
+                if r["occupied_rooms"] > 0 else None, axis=1)
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = px.line(merged.dropna(subset=["cpor"]),
+                              x="date", y="cpor",
+                              title="Labor Cost Per Occupied Room (CPOR)",
+                              labels={"cpor":"CPOR ($)","date":""},
+                              template="plotly_white")
+                fig.update_layout(margin=dict(t=40,b=10), title_font_size=14)
+                st.plotly_chart(fig, use_container_width=True); shown=True
+            with c2:
+                fig2 = go.Figure()
+                fig2.add_trace(go.Bar(x=merged["date"], y=merged["occupied_rooms"],
+                                       name="Occ. Rooms", marker_color="#90CAF9"))
+                fig2.add_trace(go.Scatter(x=merged["date"], y=merged["total_cost"],
+                                           name="Labor Cost $", yaxis="y2",
+                                           line=dict(color="#FF5722")))
+                fig2.update_layout(
+                    title="Occupancy vs Labor Cost",
+                    yaxis=dict(title="Rooms"),
+                    yaxis2=dict(title="Cost ($)", overlaying="y", side="right"),
+                    template="plotly_white",
+                    margin=dict(t=40,b=10), title_font_size=14,
+                    legend=dict(orientation="h",y=1.1))
+                st.plotly_chart(fig2, use_container_width=True); shown=True
+
+    # ── General / Department / Employee ──
     else:
         c1, c2 = st.columns(2)
         with c1:
             if not dept.empty:
                 fig = px.bar(dept, x="department", y="total_hours",
-                             color="ot_hours", color_continuous_scale=["#4CAF50", "#FF5722"],
-                             title="Hours by Department", template="plotly_white",
-                             labels={"total_hours": "Hours", "department": "",
-                                     "ot_hours": "OT Hours"})
-                fig.update_layout(margin=dict(t=40, b=10), title_font_size=14, xaxis_tickangle=-20)
-                st.plotly_chart(fig, use_container_width=True)
-                shown = True
+                             color="ot_hours",
+                             color_continuous_scale=["#4CAF50","#FF5722"],
+                             title="Hours by Department",
+                             labels={"total_hours":"Hours","department":"",
+                                     "ot_hours":"OT Hours"},
+                             template="plotly_white")
+                fig.update_layout(margin=dict(t=40,b=10), title_font_size=14,
+                                  xaxis_tickangle=-20)
+                st.plotly_chart(fig, use_container_width=True); shown=True
         with c2:
             if not dept.empty:
-                dept["total_cost"] = dept["reg_pay"] + dept["ot_pay"]
-                fig2 = px.bar(dept, x="department", y=["reg_pay", "ot_pay"],
+                d2 = dept.copy()
+                d2["total_cost"] = d2["reg_pay"] + d2["ot_pay"]
+                fig2 = px.bar(d2, x="department", y=["reg_pay","ot_pay"],
                               barmode="stack", title="Labor Cost by Department",
-                              color_discrete_map={"reg_pay": "#2196F3", "ot_pay": "#FF5722"},
-                              labels={"value": "Cost ($)", "department": ""},
+                              color_discrete_map={"reg_pay":"#2196F3","ot_pay":"#FF5722"},
+                              labels={"value":"Cost ($)","department":""},
                               template="plotly_white")
-                fig2.update_layout(margin=dict(t=40, b=10), title_font_size=14,
+                fig2.update_layout(margin=dict(t=40,b=10), title_font_size=14,
                                    xaxis_tickangle=-20,
-                                   legend=dict(title="", orientation="h", y=1.1))
+                                   legend=dict(title="",orientation="h",y=1.1))
                 fig2.for_each_trace(lambda t: t.update(
-                    name="Regular Pay" if t.name == "reg_pay" else "OT Pay"))
-                st.plotly_chart(fig2, use_container_width=True)
-                shown = True
+                    name="Regular Pay" if t.name=="reg_pay" else "OT Pay"))
+                st.plotly_chart(fig2, use_container_width=True); shown=True
 
-        emp_ot = data.get("emp_ot", pd.DataFrame())
-        if not emp_ot.empty and not emp_ot[emp_ot["ot_hours"] > 0].empty:
-            top = emp_ot[emp_ot["ot_hours"] > 0].head(8)
-            fig3 = px.bar(top, x="ot_hours", y="name", orientation="h",
-                          title="Top OT Employees", template="plotly_white",
-                          color="ot_hours", color_continuous_scale=["#FFF9C4", "#FF5722"],
-                          labels={"ot_hours": "OT Hours", "name": ""})
-            fig3.update_layout(yaxis=dict(autorange="reversed"), margin=dict(t=40, b=10), title_font_size=14)
-            st.plotly_chart(fig3, use_container_width=True)
-            shown = True
+        if not emp_ot.empty:
+            top = emp_ot[emp_ot["ot_hours"]>0].nlargest(8,"ot_hours")
+            if not top.empty:
+                fig3 = px.bar(top, x="ot_hours", y="name", orientation="h",
+                              title="Top OT Employees",
+                              color="ot_hours",
+                              color_continuous_scale=["#FFF9C4","#FF5722"],
+                              labels={"ot_hours":"OT Hours","name":""},
+                              template="plotly_white")
+                fig3.update_layout(yaxis=dict(autorange="reversed"),
+                                   margin=dict(t=40,b=10), title_font_size=14)
+                st.plotly_chart(fig3, use_container_width=True); shown=True
 
     if not shown:
         st.info("No chart data available for the selected period.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. MAIN PAGE RENDERER
+# MAIN PAGE
 # ─────────────────────────────────────────────────────────────────────────────
 def render_aipilot(hotel: str):
     st.markdown("""
@@ -471,30 +740,38 @@ def render_aipilot(hotel: str):
         border: 1px solid #e0e4f0;
         border-left: 4px solid #3D52A0;
         border-radius: 10px;
-        padding: 24px 28px;
-        margin: 12px 0 20px;
+        padding: 22px 26px;
+        margin: 8px 0 14px;
         font-size: 15px;
         line-height: 1.8;
         color: #1a1a2e;
         white-space: pre-wrap;
-        box-shadow: 0 2px 12px rgba(61,82,160,.08);
+        box-shadow: 0 2px 12px rgba(61,82,160,.07);
     }
     .ai-badge {
         background: linear-gradient(135deg,#3D52A0,#8697C4);
         color:#fff; font-size:11px; font-weight:700;
         padding:3px 10px; border-radius:20px; letter-spacing:.5px;
     }
+    .intent-tag {
+        display:inline-block; background:#e8f5e9; color:#2E7D32;
+        font-size:11px; font-weight:700; padding:2px 10px;
+        border-radius:12px; margin-left:8px;
+    }
     .mp { display:inline-block; background:#f0f4ff; border:1px solid #d0d8f5;
           border-radius:8px; padding:8px 16px; margin:4px; text-align:center; }
     .mp .v { font-size:22px; font-weight:800; color:#3D52A0; }
     .mp .l { font-size:11px; color:#666; margin-top:2px; }
-    .intent-tag { display:inline-block; background:#e8f5e9; color:#2E7D32;
-                  font-size:11px; font-weight:700; padding:2px 10px;
-                  border-radius:12px; margin-left:8px; }
+    /* Smaller suggestion buttons */
+    div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
+        padding: 4px 10px !important;
+        font-size: 12px !important;
+        border-radius: 20px !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-    # Header
+    # ── Header ──
     st.markdown("""
     <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
@@ -508,21 +785,31 @@ def render_aipilot(hotel: str):
             <span style="font-size:13px;color:#888;margin-left:8px;">Labor Intelligence</span>
         </div>
     </div>
-    <p style="color:#555;font-size:14px;margin-bottom:20px;">
-        Ask any labor question in plain English — OT analysis, scheduling, cost, risk, you name it.
-        Include the time period in your question (e.g. "last week", "this month", "YTD").
+    <p style="color:#555;font-size:13px;margin-bottom:12px;">
+        Ask any labor question — OT, scheduling, cost, risk, efficiency, comparisons. Include the time period in your question.
     </p>
     """, unsafe_allow_html=True)
 
+    # ── Suggestion chips ──
+    st.markdown('<div style="margin-bottom:6px;font-size:12px;color:#888;font-weight:600;">Try asking:</div>',
+                unsafe_allow_html=True)
+
+    # Two rows of chips, 5 per row
+    for row_start in range(0, len(SUGGESTIONS), 5):
+        row_sug = SUGGESTIONS[row_start:row_start+5]
+        cols = st.columns(len(row_sug))
+        for i, sug in enumerate(row_sug):
+            if cols[i].button(sug, key=f"sug_{row_start+i}", use_container_width=True):
+                st.session_state["ai_question"] = sug
+                st.rerun()
+
+    st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
+
+    # ── Question input ──
     question = st.text_area(
         "What do you want to know?",
-        placeholder=(
-            "e.g.  'What was our overtime last week?'  ·  "
-            "'Is anyone at OT risk this week?'  ·  "
-            "'Create a mockup schedule for this week'  ·  "
-            "'Which department had the highest labor cost this month?'"
-        ),
-        height=90,
+        placeholder="e.g.  'What was our overtime last week?'  ·  'Any OT risk this week?'  ·  'Create a mockup schedule'",
+        height=85,
         key="ai_question",
     )
 
@@ -531,33 +818,29 @@ def render_aipilot(hotel: str):
     if not run_btn:
         st.markdown("""
         <div style="background:#f8f9ff;border:1px dashed #c5cde8;border-radius:10px;
-                    padding:32px;text-align:center;color:#888;margin-top:16px;">
-            <div style="font-size:34px;margin-bottom:8px;">🤖</div>
-            <div style="font-size:15px;font-weight:600;color:#555;">Ready to answer any labor question</div>
-            <div style="font-size:13px;margin-top:6px;line-height:1.8;">
-                Try: <i>"What was our OT last week?"</i> &nbsp;·&nbsp;
-                <i>"Any OT risk this week?"</i> &nbsp;·&nbsp;
-                <i>"Summarize labor cost this month"</i>
+                    padding:28px;text-align:center;color:#888;margin-top:16px;">
+            <div style="font-size:30px;margin-bottom:8px;">🤖</div>
+            <div style="font-size:14px;font-weight:600;color:#555;">Ready to answer any labor question</div>
+            <div style="font-size:12px;margin-top:6px;line-height:1.8;">
+                Click a suggestion above or type your own question
             </div>
-        </div>
-        """, unsafe_allow_html=True)
+        </div>""", unsafe_allow_html=True)
         return
 
     if not question.strip():
         st.warning("Please enter a question.")
         return
 
-    intent = detect_intent(question)
+    intent     = detect_intent(question)
     start_date, end_date = parse_date_range(question)
 
     st.markdown(
-        f'<span style="font-size:12px;color:#888;">Analyzing: '
+        f'<span style="font-size:12px;color:#888;">Period: '
         f'<b>{start_date.strftime("%b %d")} – {end_date.strftime("%b %d, %Y")}</b></span>'
         f'<span class="intent-tag">{intent.upper()}</span>',
         unsafe_allow_html=True,
     )
 
-    # Fetch data
     with st.spinner("Fetching your data..."):
         try:
             data = fetch_data(hotel, start_date, end_date, intent)
@@ -565,8 +848,8 @@ def render_aipilot(hotel: str):
             st.error(f"Database error: {e}")
             return
 
-    # KPI pills (skip for pure scheduling / risk with no actual data)
-    t = data["totals"].iloc[0] if not data["totals"].empty else {}
+    # ── KPI Pills ──
+    t   = data["totals"].iloc[0] if not data["totals"].empty else {}
     th  = float(t.get("total_hours", 0))
     tot = float(t.get("total_ot", 0))
     rp  = float(t.get("reg_pay", 0))
@@ -577,7 +860,7 @@ def render_aipilot(hotel: str):
 
     if th > 0:
         st.markdown(f"""
-        <div style="display:flex;flex-wrap:wrap;gap:0;margin:16px 0 8px;">
+        <div style="display:flex;flex-wrap:wrap;gap:0;margin:14px 0 6px;">
             <div class="mp"><div class="v">{th:,.0f}</div><div class="l">Total Hours</div></div>
             <div class="mp"><div class="v" style="color:#e53935;">{tot:,.1f}</div><div class="l">OT Hours ({ot_pct:.1f}%)</div></div>
             <div class="mp"><div class="v">${tc:,.0f}</div><div class="l">Total Labor Cost</div></div>
@@ -586,7 +869,7 @@ def render_aipilot(hotel: str):
         </div>
         """, unsafe_allow_html=True)
 
-    # AI summary
+    # ── AI Summary ──
     with st.spinner("Generating executive summary..."):
         try:
             prompt  = build_prompt(hotel, start_date, end_date, question, intent, data)
@@ -596,25 +879,27 @@ def render_aipilot(hotel: str):
             return
 
     st.markdown(
-        f'<div style="display:flex;align-items:center;gap:10px;margin-top:20px;">'
-        f'<span style="font-size:16px;font-weight:700;color:#1a1a2e;">Executive Summary</span>'
-        f'<span class="ai-badge">AI · Llama 3.3 70B</span></div>'
-        f'<div class="ai-card">{summary}</div>',
+        '<div style="display:flex;align-items:center;gap:10px;margin-top:18px;">'
+        '<span style="font-size:16px;font-weight:700;color:#1a1a2e;">Executive Summary</span>'
+        '<span class="ai-badge">AI · Llama 3.3 70B</span></div>',
         unsafe_allow_html=True,
     )
+    render_ai_response(summary)
 
-    # Charts
+    # ── Charts ──
     st.markdown("---")
     st.markdown("#### Supporting Analysis")
     render_charts(intent, data)
 
-    # Raw data
+    # ── Raw data expander ──
     with st.expander("View Raw Data"):
-        for label, key in [("Department Breakdown", "dept"), ("Employee OT Detail", "emp_ot"),
-                            ("Schedule", "schedule"), ("Headcount", "headcount"),
-                            ("OT Risk", "ot_risk"), ("Daily Trend", "daily"),
-                            ("Daily OT", "daily_ot"), ("Employee Roster", "employees")]:
+        labels = [("Department", "dept"), ("Employee Detail", "emp_ot"),
+                  ("Position", "position"), ("Daily Trend", "daily"),
+                  ("OT Risk", "ot_risk"), ("Schedule", "schedule"),
+                  ("Headcount", "headcount_daily"), ("Roster", "roster"),
+                  ("Rooms", "rooms"), ("Prev Totals", "prev_totals")]
+        for label, key in labels:
             df = data.get(key)
             if df is not None and not df.empty:
                 st.markdown(f"**{label}**")
-                st.dataframe(df, use_container_width=True)
+                st.dataframe(df, use_container_width=True, hide_index=True)

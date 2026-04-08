@@ -1278,7 +1278,7 @@ if _os.path.exists(_logo_path):
             position : fixed;
             bottom   : 12px;
             left     : 0;
-            width    : 185px;
+            width    : 220px;
             display  : flex;
             justify-content: center;
             padding  : 0 4px;
@@ -1286,7 +1286,7 @@ if _os.path.exists(_logo_path):
             z-index  : 9999;
         }}
         .lp-sidebar-logo img {{
-            width    : 177px;
+            width    : 212px;
             max-width: 100%;
             height   : auto;
         }}
@@ -1314,8 +1314,8 @@ st.markdown("""
 
     /* ───── Sidebar Width ───── */
     [data-testid="stSidebar"][aria-expanded="true"] > div:first-child {
-        width: 185px;
-        min-width: 185px;
+        width: 220px;
+        min-width: 220px;
     }
 
     /* ───── Sidebar Text Styling ───── */
@@ -1401,9 +1401,9 @@ if page_changed:
       <div id="la_overlay_fixed" aria-label="Loading"
            style="opacity:1; visibility:visible;">
 
-        <!-- White backdrop ONLY over main content (sidebar width = 185px) -->
+        <!-- White backdrop ONLY over main content (sidebar width = 220px) -->
         <div style="
-             position:fixed; top:0; left:220px; right:0; bottom:0;
+             position:fixed; top:0; left:255px; right:0; bottom:0;
              background:#ffffff; pointer-events:none;
              z-index:2147483646;                  /* below spinner */
              animation: la_fadeout 1.0s forwards;">

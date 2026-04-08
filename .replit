@@ -56,4 +56,4 @@ externalPort = 8000
 
 [deployment]
 deploymentTarget = "vm"
-run = ["streamlit", "run", "app.py"]
+run = ["bash", "start.sh"]

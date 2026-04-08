@@ -1265,6 +1265,37 @@ else:
 
 main_choice = st.sidebar.radio("Menu", menu_options, key="main_menu")
 
+# ── Sidebar logo (bottom-centered) ─────────────────────────────────────────
+import base64 as _b64, os as _os
+_logo_path = _os.path.join(_os.path.dirname(__file__), "attached_assets",
+                           "LaborPilot_logo_on_checkered_background_1775657495620.png")
+if _os.path.exists(_logo_path):
+    with open(_logo_path, "rb") as _f:
+        _logo_b64 = _b64.b64encode(_f.read()).decode()
+    st.sidebar.markdown(f"""
+        <style>
+        .lp-sidebar-logo {{
+            position : fixed;
+            bottom   : 18px;
+            left     : 0;
+            width    : 185px;
+            display  : flex;
+            justify-content: center;
+            padding  : 0 12px;
+            box-sizing: border-box;
+            z-index  : 9999;
+        }}
+        .lp-sidebar-logo img {{
+            width    : 130px;
+            max-width: 100%;
+            height   : auto;
+        }}
+        </style>
+        <div class="lp-sidebar-logo">
+            <img src="data:image/png;base64,{_logo_b64}" alt="LaborPilot">
+        </div>
+    """, unsafe_allow_html=True)
+
 st.markdown("""
     <style>
     /* ───── Dynamic Sidebar Gradient Background ───── */

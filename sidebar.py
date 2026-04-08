@@ -38,6 +38,20 @@ def render_sidebar():
             height: 20px;
             stroke: white;
         }
+
+        .sidebar-logo-wrap {
+            display: flex;
+            justify-content: center;
+            margin-top: auto;
+            padding: 18px 12px 12px;
+        }
+
+        .sidebar-logo {
+            width: 140px;
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -71,3 +85,5 @@ def render_sidebar():
 
         if clicked:
             st.session_state.main_page = label
+
+    st.sidebar.markdown('<div class="sidebar-logo-wrap"><img class="sidebar-logo" src="/static_logo.png" alt="LaborPilot"></div>', unsafe_allow_html=True)

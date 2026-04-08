@@ -1,14 +1,10 @@
-# ============================================================
-# scheduler.py — Background Scheduled Task Runner
-# Runs OT Risk + Forecast Variance → Excel/PDF → emails results
-# ============================================================
-
 import os
+import tempfile
 import pandas as pd
 from datetime import datetime, date, timedelta
 from dateutil.relativedelta import relativedelta, MO
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_engine
+from database import engine as ENGINE
 from db import ScheduledTask
 from email_sender import send_email
 from report_logic import (
@@ -17,9 +13,8 @@ from report_logic import (
     run_forecast_variance_report,
     prepare_forecast_variance_export,
     run_productivity_index_report,
-    run_labor_variance_report      # ✅ ADDED
+    run_labor_variance_report,
 )
-
 from scheduler_report_exports import (
     export_ot_risk_excel,
     export_ot_risk_pdf,
@@ -27,49 +22,32 @@ from scheduler_report_exports import (
     export_forecast_variance_pdf,
     export_productivity_index_excel,
     export_productivity_index_pdf,
-    export_labor_variance_excel,    # ✅ ADDED
-    export_labor_variance_pdf       # ✅ ADDED
+    export_labor_variance_excel,
+    export_labor_variance_pdf,
 )
 
-# ------------------------------------------------------------
-# CONFIG — PATHS
-# ------------------------------------------------------------
-DB_PATH = r"C:\Users\jperez\OneDrive - Highgate\Desktop\Labor tool with stremlit and fast api v1\Labor tool with stremlit and fast api v1\labor tool to FastAPI\hotel_labor.db"
-OUTPUT_DIR = r"C:\Users\jperez\LaborSchedulerTemp"
-
+OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "labor_scheduler")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ------------------------------------------------------------
-# DATABASE SESSION
-# ------------------------------------------------------------
-engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
-Session = sessionmaker(bind=engine)
-session = Session()
+Session = sessionmaker(bind=ENGINE)
 
 
-# ------------------------------------------------------------
-# DATE-MODE → RANGE CALCULATIONS
-# ------------------------------------------------------------
 def get_date_ranges(date_mode):
     today = date.today()
 
     if date_mode == "Yesterday":
         start = today - timedelta(days=1)
         end   = start
-
     elif date_mode == "Current Week":
         start = today + relativedelta(weekday=MO(-1))
         end   = start + timedelta(days=6)
-
     elif date_mode == "Last Week":
         this_monday = today + relativedelta(weekday=MO(-1))
         start = this_monday - timedelta(days=7)
         end   = this_monday - timedelta(days=1)
-
     elif date_mode == "MTD":
         start = date(today.year, today.month, 1)
         end   = today
-
     else:
         start = today
         end   = today
@@ -80,352 +58,197 @@ def get_date_ranges(date_mode):
     return start, end, sched_start, sched_end
 
 
-# ------------------------------------------------------------
-# MAIN SCHEDULER LOOP
-# ------------------------------------------------------------
-def run_scheduled_jobs():
+def _is_task_due(task) -> bool:
+    """Return True if this task should fire right now based on run_time + frequency."""
+    now = datetime.now()
+    try:
+        hour, minute = map(int, task.run_time.split(":"))
+    except Exception:
+        return False
 
-    print("\n======================================")
-    print("Running scheduled jobs:", datetime.now())
-    print("======================================\n")
+    if now.hour != hour or now.minute != minute:
+        return False
 
-    tasks = session.query(ScheduledTask).all()
+    freq = (task.frequency or "Daily").strip().lower()
+    if freq == "daily":
+        return True
 
-    for t in tasks:
-        print(f"Checking task {t.id}: {t.task_type} for hotel {t.hotel_name}")
-        print("⏭ FORCE RUN FOR TESTING\n")
+    created = task.created_at or now
+    if freq == "weekly":
+        return now.weekday() == created.weekday()
 
-        # --------------------------------------------------------
-        # Compute date ranges
-        # --------------------------------------------------------
-        week_start, week_end, sched_week_start, sched_week_end = get_date_ranges(t.date_mode)
+    if freq == "bi-weekly":
+        weeks_since = (now.date() - created.date()).days // 7
+        return now.weekday() == created.weekday() and weeks_since % 2 == 0
 
-        # --------------------------------------------------------
-        # Shared metadata for all reports
-        # --------------------------------------------------------
-        metadata = {
-            "hotel": t.hotel_name,
-            "dept": t.department or "(All)",
-            "pos": t.position or "(All)",
+    return True
+
+
+def run_single_task(task, session=None):
+    """
+    Run one ScheduledTask immediately — used by both the cron loop and Send Now.
+    Pass an existing session or leave None to create a fresh one.
+    """
+    close_session = False
+    if session is None:
+        session = Session()
+        close_session = True
+
+    try:
+        week_start, week_end, sched_week_start, sched_week_end = get_date_ranges(task.date_mode)
+
+        now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stamp   = f"{task.id}_{now_str}"
+
+        metadata_base = {
+            "hotel":       task.hotel_name,
+            "dept":        task.department or "(All)",
+            "pos":         task.position   or "(All)",
             "sched_range": f"{sched_week_start:%m-%d-%Y} to {sched_week_end:%m-%d-%Y}",
-            "actual_range": f"{week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}",
-            "created_str": f"Created on {datetime.now():%m/%d/%Y %I:%M %p}"
+            "actual_range":f"{week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}",
+            "created_str": f"Created on {datetime.now():%m/%d/%Y %I:%M %p}",
         }
 
-        # --------------------------------------------------------
-        # =============== RUN THE CORRECT REPORT ===============
-        # --------------------------------------------------------
+        dept_label = task.department or "All Departments"
+        pos_label  = task.position   or "All Positions"
+        date_range = f"{week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}"
 
-        # =====================
-        # OT RISK
-        # =====================
-        if t.task_type == "OT Risk":
-            print("▶ Running OT Risk")
+        excel_file = None
+        pdf_file   = None
+        subject    = ""
+        body       = ""
 
+        if task.task_type == "OT Risk":
             df = run_ot_risk_report(
                 session=session,
-                week_start=week_start,
-                week_end=week_end,
-                sched_week_start=sched_week_start,
-                sched_week_end=sched_week_end,
-                dept=t.department,
-                pos=t.position
+                week_start=week_start, week_end=week_end,
+                sched_week_start=sched_week_start, sched_week_end=sched_week_end,
+                dept=task.department, pos=task.position,
             )
-
             if df is None or df.empty:
-                print("⚠ No OT Risk data. Skipping.\n")
-                continue
+                return False, "No OT Risk data available for the selected period."
 
-            export_df = prepare_ot_risk_export(df.copy())
+            export_df  = prepare_ot_risk_export(df.copy())
+            excel_path = os.path.join(OUTPUT_DIR, f"ot_risk_{stamp}.xlsx")
+            pdf_path   = os.path.join(OUTPUT_DIR, f"ot_risk_{stamp}.pdf")
+            excel_file = export_ot_risk_excel(export_df.copy(), excel_path, metadata_base)
+            pdf_file   = export_ot_risk_pdf(export_df.copy(), pdf_path, metadata_base)
 
-            excel_path = os.path.join(
-                OUTPUT_DIR, f"ot_risk_{t.id}_{datetime.now():%Y%m%d}.xlsx"
-            )
-            pdf_path = os.path.join(
-                OUTPUT_DIR, f"ot_risk_{t.id}_{datetime.now():%Y%m%d}.pdf"
-            )
-
-            excel_file = export_ot_risk_excel(export_df.copy(), excel_path, metadata)
-            pdf_file   = export_ot_risk_pdf(export_df.copy(), pdf_path, metadata)
-
-            dept_label = t.department if t.department else "All Departments"
-
-            subject = f"{t.hotel_name} | OT Risk Report | {dept_label} | {week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}"
-            body = (
-                f"Hello,\n\n"
-                f"Attached is the OT Risk Report for:\n"
-                f"Hotel: {t.hotel_name}\n"
-                f"Department: {dept_label}\n"
-                f"Actuals: {week_start:%m-%d-%Y} → {week_end:%m-%d-%Y}\n"
+            subject = f"{task.hotel_name} | OT Risk Report | {dept_label} | {date_range}"
+            body    = (
+                f"Hello,\n\nAttached is the OT Risk Report for:\n"
+                f"Hotel: {task.hotel_name}\nDepartment: {dept_label}\n"
+                f"Actuals: {date_range}\n"
                 f"Schedule Week: {sched_week_start:%m-%d-%Y} → {sched_week_end:%m-%d-%Y}\n\n"
-                f"Regards,\nLaborPilot Scheduler"
+                f"Regards,\nLaborPilot"
             )
 
-        # =====================
-        # FORECAST VARIANCE
-        # =====================
-        elif t.task_type == "Forecast Variance":
-            print("▶ Running Forecast Variance")
-
+        elif task.task_type == "Forecast Variance":
             df = run_forecast_variance_report(
                 session=session,
-                week_start=week_start,
-                week_end=week_end,
-                dept=t.department
+                week_start=week_start, week_end=week_end,
+                dept=task.department,
             )
-
             if df is None or df.empty:
-                print("⚠ No Forecast Variance data. Skipping.\n")
-                continue
+                return False, "No Forecast Variance data available for the selected period."
 
-            export_df = prepare_forecast_variance_export(df.copy())
+            export_df  = prepare_forecast_variance_export(df.copy())
+            excel_path = os.path.join(OUTPUT_DIR, f"forecast_variance_{stamp}.xlsx")
+            pdf_path   = os.path.join(OUTPUT_DIR, f"forecast_variance_{stamp}.pdf")
+            excel_file = export_forecast_variance_excel(export_df.copy(), excel_path, metadata_base)
+            pdf_file   = export_forecast_variance_pdf(export_df.copy(), pdf_path, metadata_base)
 
-            excel_path = os.path.join(
-                OUTPUT_DIR, f"forecast_variance_{t.id}_{datetime.now():%Y%m%d}.xlsx"
-            )
-            pdf_path = os.path.join(
-                OUTPUT_DIR, f"forecast_variance_{t.id}_{datetime.now():%Y%m%d}.pdf"
-            )
-
-            excel_file = export_forecast_variance_excel(export_df.copy(), excel_path, metadata)
-            pdf_file   = export_forecast_variance_pdf(export_df.copy(), pdf_path, metadata)
-
-            subject = f"Forecast Variance Report — {t.hotel_name}"
-            body = (
-                f"Hello,\n\n"
-                f"Attached is the Forecast Variance Report for:\n"
-                f"Week: {week_start:%m-%d-%Y} → {week_end:%m-%d-%Y}\n\n"
-                f"Task ID: {t.id}\n"
-                f"Hotel: {t.hotel_name}\n\n"
-                f"Regards,\nLaborPilot Scheduler"
+            subject = f"{task.hotel_name} | Forecast Variance Report | {dept_label} | {date_range}"
+            body    = (
+                f"Hello,\n\nAttached is the Forecast Variance Report for:\n"
+                f"Hotel: {task.hotel_name}\nDepartment: {dept_label}\n"
+                f"Week: {date_range}\n\nRegards,\nLaborPilot"
             )
 
-        # --------------------------------------------------------
-        # =============== RUN THE CORRECT REPORT ===============
-        # --------------------------------------------------------
-
-        # =====================
-        # OT RISK
-        # =====================
-        if t.task_type == "OT Risk":
-            print("▶ Running OT Risk")
-
-            df = run_ot_risk_report(
-                session=session,
-                week_start=week_start,
-                week_end=week_end,
-                sched_week_start=sched_week_start,
-                sched_week_end=sched_week_end,
-                dept=t.department,
-                pos=t.position
-            )
-
-            if df is None or df.empty:
-                print("⚠ No OT Risk data. Skipping.\n")
-                continue
-
-            export_df = prepare_ot_risk_export(df.copy())
-
-            excel_path = os.path.join(
-                OUTPUT_DIR, f"ot_risk_{t.id}_{datetime.now():%Y%m%d}.xlsx"
-            )
-            pdf_path = os.path.join(
-                OUTPUT_DIR, f"ot_risk_{t.id}_{datetime.now():%Y%m%d}.pdf"
-            )
-
-            excel_file = export_ot_risk_excel(export_df.copy(), excel_path, metadata)
-            pdf_file   = export_ot_risk_pdf(export_df.copy(), pdf_path, metadata)
-
-            dept_label = t.department if t.department else "All Departments"
-
-            subject = f"{t.hotel_name} → OT Risk Report | {dept_label} | {week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}"
-            body = (
-                f"Hello,\n\n"
-                f"Attached is the OT Risk Report for:\n"
-                f"Hotel: {t.hotel_name}\n"
-                f"Department: {dept_label}\n"
-                f"Actuals: {week_start:%m-%d-%Y} → {week_end:%m-%d-%Y}\n"
-                f"Schedule Week: {sched_week_start:%m-%d-%Y} → {sched_week_end:%m-%d-%Y}\n\n"
-                f"Regards,\nLaborPilot Scheduler"
-            )
-
-
-        # =====================
-        # FORECAST VARIANCE
-        # =====================
-        elif t.task_type == "Forecast Variance":
-            print("▶ Running Forecast Variance")
-
-            df = run_forecast_variance_report(
-                session=session,
-                week_start=week_start,
-                week_end=week_end,
-                dept=t.department
-            )
-
-            if df is None or df.empty:
-                print("⚠ No Forecast Variance data. Skipping.\n")
-                continue
-
-            export_df = prepare_forecast_variance_export(df.copy())
-
-            excel_path = os.path.join(
-                OUTPUT_DIR, f"forecast_variance_{t.id}_{datetime.now():%Y%m%d}.xlsx"
-            )
-            pdf_path = os.path.join(
-                OUTPUT_DIR, f"forecast_variance_{t.id}_{datetime.now():%Y%m%d}.pdf"
-            )
-
-            excel_file = export_forecast_variance_excel(export_df.copy(), excel_path, metadata)
-            pdf_file   = export_forecast_variance_pdf(export_df.copy(), pdf_path, metadata)
-
-            dept_label = t.department if t.department else "All Departments"
-
-            subject = f"{t.hotel_name} → Forecast Variance Report | {dept_label} | {week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}"
-            body = (
-                f"Hello,\n\n"
-                f"Attached is the Forecast Variance Report for:\n"
-                f"Hotel: {t.hotel_name}\n"
-                f"Department: {dept_label}\n"
-                f"Week: {week_start:%m-%d-%Y} → {week_end:%m-%d-%Y}\n\n"
-                f"Regards,\nLaborPilot Scheduler"
-            )
-
-
-        # =====================
-        # PRODUCTIVITY INDEX
-        # =====================
-        elif t.task_type == "Productivity Index":
-
-            print("▶ Running Productivity Index")
-
-            week_start, week_end, _, _ = get_date_ranges(t.date_mode)
-
+        elif task.task_type == "Productivity Index":
             df = run_productivity_index_report(
                 session=session,
-                week_start=week_start,
-                week_end=week_end,
-                dept=t.department,
-                pos=t.position
+                week_start=week_start, week_end=week_end,
+                dept=task.department, pos=task.position,
             )
-
             if df is None or df.empty:
-                print("⚠ No Productivity Index data. Skipping.\n")
-                continue
+                return False, "No Productivity Index data available for the selected period."
 
-            metadata = {
-                "hotel": t.hotel_name,
-                "dept": t.department or "(All)",
-                "pos": t.position or "(All)",
-                "period": f"{week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}",
-                "created_str": f"Created on {datetime.now():%m/%d/%Y %I:%M %p}"
-            }
+            metadata_pi = {**metadata_base, "period": date_range}
+            excel_path  = os.path.join(OUTPUT_DIR, f"productivity_{stamp}.xlsx")
+            pdf_path    = os.path.join(OUTPUT_DIR, f"productivity_{stamp}.pdf")
+            excel_file  = export_productivity_index_excel(df.copy(), excel_path, metadata_pi)
+            pdf_file    = export_productivity_index_pdf(df.copy(), pdf_path, metadata_pi)
 
-            excel_path = os.path.join(
-                OUTPUT_DIR,
-                f"productivity_{t.id}_{datetime.now():%Y%m%d}.xlsx"
+            subject = f"{task.hotel_name} | Productivity Index Report | {dept_label} | {date_range}"
+            body    = (
+                f"Hello,\n\nAttached is the Productivity Index Report for:\n"
+                f"Hotel: {task.hotel_name}\nDepartment: {dept_label}\n"
+                f"Position: {pos_label}\nPeriod: {date_range}\n\nRegards,\nLaborPilot"
             )
 
-            pdf_path = os.path.join(
-                OUTPUT_DIR,
-                f"productivity_{t.id}_{datetime.now():%Y%m%d}.pdf"
-            )
-
-            excel_file = export_productivity_index_excel(df.copy(), excel_path, metadata)
-            pdf_file   = export_productivity_index_pdf(df.copy(), pdf_path, metadata)
-
-            dept_label = t.department if t.department else "All Departments"
-            pos_label  = t.position if t.position else "All Positions"
-
-            subject = f"{t.hotel_name} → Productivity Index Report | {dept_label} | {week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}"
-            body = (
-                f"Hello,\n\n"
-                f"Attached is the Productivity Index Report for:\n"
-                f"Hotel: {t.hotel_name}\n"
-                f"Department: {dept_label}\n"
-                f"Position: {pos_label}\n"
-                f"Period: {week_start:%m-%d-%Y} → {week_end:%m-%d-%Y}\n\n"
-                f"Regards,\nLaborPilot Scheduler"
-            )
-
-        # =====================
-        # LABOR VARIANCE
-        # =====================
-        elif t.task_type == "Labor Variance":
-
-            print("▶ Running Labor Variance")
-
+        elif task.task_type == "Labor Variance":
             df = run_labor_variance_report(
                 session=session,
-                week_start=week_start,
-                week_end=week_end,
-                dept=t.department,
-                pos=t.position
+                week_start=week_start, week_end=week_end,
+                dept=task.department, pos=task.position,
             )
-
             if df is None or df.empty:
-                print("⚠ No Labor Variance data. Skipping.\n")
-                continue
+                return False, "No Labor Variance data available for the selected period."
 
-            metadata = {
-                "hotel": t.hotel_name,
-                "dept": t.department or "(All)",
-                "pos": t.position or "(All)",
-                "period": f"{week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}",
-                "created_str": f"Created on {datetime.now():%m/%d/%Y %I:%M %p}"
-            }
+            metadata_lv = {**metadata_base, "period": date_range}
+            excel_path  = os.path.join(OUTPUT_DIR, f"labor_variance_{stamp}.xlsx")
+            pdf_path    = os.path.join(OUTPUT_DIR, f"labor_variance_{stamp}.pdf")
+            excel_file  = export_labor_variance_excel(df.copy(), excel_path, metadata_lv)
+            pdf_file    = export_labor_variance_pdf(df.copy(), pdf_path, metadata_lv)
 
-            excel_path = os.path.join(
-                OUTPUT_DIR,
-                f"labor_variance_{t.id}_{datetime.now():%Y%m%d}.xlsx"
+            subject = f"{task.hotel_name} | Labor Variance Report | {dept_label} | {date_range}"
+            body    = (
+                f"Hello,\n\nAttached is the Labor Variance Report for:\n"
+                f"Hotel: {task.hotel_name}\nDepartment: {dept_label}\n"
+                f"Week: {date_range}\n\nRegards,\nLaborPilot"
             )
-
-            pdf_path = os.path.join(
-                OUTPUT_DIR,
-                f"labor_variance_{t.id}_{datetime.now():%Y%m%d}.pdf"
-            )
-
-            excel_file = export_labor_variance_excel(df.copy(), excel_path, metadata)
-            pdf_file   = export_labor_variance_pdf(df.copy(), pdf_path, metadata)
-
-            recipients = [e.strip() for e in t.emails.split(",") if e.strip()]
-
-            dept_label = t.department if t.department else "All Departments"
-
-            subject = f"{t.hotel_name} → Labor Variance Report | {dept_label} | {week_start:%m-%d-%Y} to {week_end:%m-%d-%Y}"
-            body = (
-                f"Hello,\n\n"
-                f"Attached is the Labor Variance Report for:\n"
-                f"Hotel: {t.hotel_name}\n"
-                f"Department: {dept_label}\n"
-                f"Week: {week_start:%m-%d-%Y} → {week_end:%m-%d-%Y}\n\n"
-                f"Regards,\nLaborPilot Scheduler"
-            )
-
 
         else:
-            print(f"⚠ Unsupported task type: {t.task_type}\n")
-            continue
+            return False, f"Unsupported task type: {task.task_type}"
 
-        # --------------------------------------------------------
-        # SEND EMAIL
-        # --------------------------------------------------------
-        recipients = [e.strip() for e in t.emails.split(",") if e.strip()]
+        recipients = [e.strip() for e in task.emails.split(",") if e.strip()]
+        if not recipients:
+            return False, "No valid email recipients configured."
 
         send_email(
             recipients=recipients,
             subject=subject,
             body=body,
-            attachments=[excel_file, pdf_file]
+            attachments=[f for f in [excel_file, pdf_file] if f],
         )
+        return True, f"Report sent to {', '.join(recipients)}"
 
-        print("✅ Task completed!\n")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return False, str(e)
+    finally:
+        if close_session:
+            session.close()
 
-    print("All scheduled tasks processed.\n")
+
+def run_scheduled_jobs():
+    """Check all tasks and run those that are due right now."""
+    print(f"\n[Scheduler] Checking at {datetime.now():%Y-%m-%d %H:%M}")
+    session = Session()
+    try:
+        tasks = session.query(ScheduledTask).all()
+        for task in tasks:
+            if _is_task_due(task):
+                print(f"[Scheduler] Running task {task.id}: {task.task_type} for {task.hotel_name}")
+                ok, msg = run_single_task(task, session=session)
+                print(f"[Scheduler] {'✅' if ok else '❌'} {msg}")
+            else:
+                print(f"[Scheduler] Skipping task {task.id} (not due yet)")
+    finally:
+        session.close()
 
 
-# ------------------------------------------------------------
-# RUN SCHEDULER
-# ------------------------------------------------------------
 if __name__ == "__main__":
     run_scheduled_jobs()

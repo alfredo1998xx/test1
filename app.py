@@ -10998,13 +10998,35 @@ elif main_choice == "Scheduled Tasks":
 
                               st.markdown("---")
 
-                              # ---- DELETE BUTTON ----
-                              delete_key = f"delete_task_{t.id}"
-                              if st.button("🗑️ Delete Task", key=delete_key):
-                                    session.delete(t)
-                                    session.commit()
-                                    st.success("Task deleted.")
-                                    st.rerun()
+                              # ---- ACTION BUTTONS (Send Now | Delete) ----
+                              btn_col1, btn_col2 = st.columns([1, 1])
+
+                              with btn_col1:
+                                    send_key = f"send_now_{t.id}"
+                                    if st.button("📤 Send Now", key=send_key, type="primary"):
+                                          with st.spinner("Generating report and sending email..."):
+                                                try:
+                                                      resp = requests.post(
+                                                            f"{API_URL}/run-task/{t.id}",
+                                                            headers={"Authorization": f"Bearer {st.session_state.token}"},
+                                                            timeout=60
+                                                      )
+                                                      if resp.status_code == 200:
+                                                            msg = resp.json().get("message", "Report sent.")
+                                                            st.success(f"✅ {msg}")
+                                                      else:
+                                                            detail = resp.json().get("detail", "Unknown error")
+                                                            st.error(f"❌ {detail}")
+                                                except Exception as e:
+                                                      st.error(f"❌ Error: {e}")
+
+                              with btn_col2:
+                                    delete_key = f"delete_task_{t.id}"
+                                    if st.button("🗑️ Delete Task", key=delete_key):
+                                          session.delete(t)
+                                          session.commit()
+                                          st.success("Task deleted.")
+                                          st.rerun()
 
 elif main_choice == "Admin":
     if role not in ("admin", "super user"):  # role is already normalized to lowercase

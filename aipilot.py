@@ -1,644 +1,673 @@
 """
-aipilot.py — AI-powered labor intelligence for LaborPilot
-Full database awareness: employees, schedules, positions, costs, OT, mockups.
+aipilot.py — AIPilot: full-app AI intelligence for LaborPilot
+Modern light design · reads all 20+ tables · schedule/cost/OT/rooms/reports
 """
 
-import os
-import re
-import io
-import base64
-import calendar
+import os, re, io, base64, calendar
 from typing import Optional
+from datetime import date, timedelta
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
-from datetime import date, timedelta, datetime
 from groq import Groq
 from sqlalchemy import text
 from db import ENGINE
 from email_sender import send_email
 
+# ─── palette ────────────────────────────────────────────────────────────────
+PRIMARY   = "#3D52A0"
+LIGHT_BG  = "#f5f6fa"
+CARD_BG   = "#ffffff"
+BORDER    = "#e2e8f0"
+TXT       = "#1e293b"
+TXT2      = "#64748b"
+RED       = "#ef4444"
+GREEN     = "#22c55e"
+BLUE      = "#3b82f6"
+AMBER     = "#f59e0b"
 
-# ─────────────────────────── Logo ───────────────────────────────────────────
-def _logo_b64() -> str:
-    path = os.path.join(os.path.dirname(__file__),
-                        "attached_assets", "laborpilot_logo_nobg.png")
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
+# ─── logo ────────────────────────────────────────────────────────────────────
+def _logo() -> str:
+    p = os.path.join(os.path.dirname(__file__), "attached_assets", "laborpilot_logo_nobg.png")
+    if os.path.exists(p):
+        with open(p, "rb") as f: return base64.b64encode(f.read()).decode()
     return ""
 
-
-# ─────────────────────────── Date parser ─────────────────────────────────────
+# ─── date parser ─────────────────────────────────────────────────────────────
 def parse_dates(q: str):
-    q = q.lower()
-    today = date.today()
-    if "today" in q:
-        return today, today
-    if "yesterday" in q:
-        d = today - timedelta(days=1); return d, d
+    q = q.lower(); today = date.today()
+    if "today"     in q: return today, today
+    if "yesterday" in q: d=today-timedelta(1); return d,d
     if "next week" in q:
-        d = (7 - today.weekday()) % 7 or 7
-        s = today + timedelta(days=d)
-        return s, s + timedelta(days=6)
-    if "this week" in q:
-        s = today - timedelta(days=today.weekday()); return s, today
+        d=(7-today.weekday())%7 or 7; s=today+timedelta(d); return s,s+timedelta(6)
+    if "this week" in q: return today-timedelta(today.weekday()),today
     if "last week" in q:
-        s = today - timedelta(days=today.weekday() + 7)
-        return s, s + timedelta(days=6)
+        s=today-timedelta(today.weekday()+7); return s,s+timedelta(6)
     if "next month" in q:
-        m = today.month % 12 + 1; y = today.year + (1 if today.month == 12 else 0)
-        return date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1])
-    if "this month" in q:
-        return today.replace(day=1), today
+        m=today.month%12+1; y=today.year+(1 if today.month==12 else 0)
+        return date(y,m,1),date(y,m,calendar.monthrange(y,m)[1])
+    if "this month" in q: return today.replace(day=1),today
     if "last month" in q:
-        f = today.replace(day=1); lp = f - timedelta(days=1)
-        return lp.replace(day=1), lp
-    if "last 7 days" in q or "past 7" in q:
-        return today - timedelta(6), today
-    if "last 14" in q or "two weeks" in q:
-        return today - timedelta(13), today
-    if "last 30" in q or "past 30" in q:
-        return today - timedelta(29), today
-    if "last 60" in q:
-        return today - timedelta(59), today
-    if "last 90" in q or "quarter" in q:
-        return today - timedelta(89), today
-    if "this year" in q or "ytd" in q:
-        return today.replace(month=1, day=1), today
-    months = {"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
-              "july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
-    for mn, mv in months.items():
+        f=today.replace(day=1); lp=f-timedelta(1); return lp.replace(day=1),lp
+    for n,d in [("7",6),("14",13),("30",29),("60",59),("90",89)]:
+        if f"last {n}" in q or f"past {n}" in q: return today-timedelta(d),today
+    if "quarter" in q: return today-timedelta(89),today
+    if "this year" in q or "ytd" in q: return today.replace(month=1,day=1),today
+    months={"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+            "july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
+    for mn,mv in months.items():
         if mn in q:
-            y = today.year - (1 if mv > today.month else 0)
-            return date(y, mv, 1), date(y, mv, calendar.monthrange(y, mv)[1])
-    return today - timedelta(29), today
+            y=today.year-(1 if mv>today.month else 0)
+            return date(y,mv,1),date(y,mv,calendar.monthrange(y,mv)[1])
+    return today-timedelta(29),today
 
-
-# ─────────────────────────── Intent detection ─────────────────────────────────
-def detect_intent(q: str) -> list:
-    q = q.lower()
-    r = []
-    if any(w in q for w in ["overtime","ot ","ot,","overti"]): r.append("overtime")
-    if any(w in q for w in ["cost","pay","spend","budget","wage","dollar","labor cost"]): r.append("cost")
-    if any(w in q for w in ["department","dept","housekeeping","front desk","food","f&b",
-                              "engineering","guest service","maintenance","security","spa"]): r.append("department")
-    if any(w in q for w in ["employee","staff","worker","who","top","highest","most","team","agent","name"]): r.append("employee")
-    if any(w in q for w in ["trend","daily","day by day","over time","pattern"]): r.append("trend")
-    if any(w in q for w in ["schedule","shift","roster","mockup","mock","next week","plan",
-                              "coverage","assign","rotation","generate","create a","make a",
-                              "table","week"]):  r.append("schedule_mockup")
-    if any(w in q for w in ["room","occupancy","occ","occupied"]): r.append("rooms")
-    if not r: r = ["overtime","cost","department","employee","trend"]
+# ─── intent detection ─────────────────────────────────────────────────────────
+def detect(q: str) -> list:
+    q=q.lower(); r=[]
+    if any(w in q for w in ["overtime","ot ","ot,","overti","risk"]): r.append("overtime")
+    if any(w in q for w in ["cost","pay","spend","budget","wage","dollar","labor cost","payroll"]): r.append("cost")
+    if any(w in q for w in ["department","dept","housekeeping","front desk","food","f&b","engineering",
+                              "guest service","maintenance","security","spa","banquet"]): r.append("department")
+    if any(w in q for w in ["employee","staff","worker","who","top","highest","most","team","agent","name","person"]): r.append("employee")
+    if any(w in q for w in ["trend","daily","day by day","over time","pattern","history"]): r.append("trend")
+    if any(w in q for w in ["schedule","shift","roster","mockup","mock","next week","plan","coverage",
+                              "assign","rotation","generate","create","make a","build","table","week"]): r.append("schedule")
+    if any(w in q for w in ["room","occupancy","occ","occupied","adr","revpar","pickup","forecast","otb"]): r.append("rooms")
+    if any(w in q for w in ["position","role","title","job","labor standard","standard"]): r.append("positions")
+    if any(w in q for w in ["report","summary","breakdown","analysis","overview"]): r.append("report")
+    if not r: r=["overtime","cost","department","employee"]
     return r
 
+# ─── DB helpers ──────────────────────────────────────────────────────────────
+def Q(sql,p={}):
+    with ENGINE.connect() as c: return pd.read_sql_query(text(sql),c,params=p)
 
-# ─────────────────────────── DB helpers ──────────────────────────────────────
-def _q(sql: str, p: dict) -> pd.DataFrame:
-    with ENGINE.connect() as c:
-        return pd.read_sql_query(text(sql), c, params=p)
+def employees(hotel):
+    return Q("SELECT id,name,department,role,hourly_rate,emp_type FROM employee WHERE hotel_name=:h ORDER BY department,name",{"h":hotel})
 
-def fetch_employees(hotel: str) -> pd.DataFrame:
-    return _q("SELECT id,name,department,role,hourly_rate,emp_type FROM employee WHERE hotel_name=:h ORDER BY department,name",
-              {"h": hotel})
+def positions(hotel):
+    return Q("SELECT p.name position,p.department_id,d.name department FROM positions p JOIN departments d ON d.id=p.department_id WHERE p.hotel_name=:h ORDER BY d.name,p.name",{"h":hotel})
 
-def fetch_positions(hotel: str) -> pd.DataFrame:
-    return _q("""SELECT p.name AS position, d.name AS department
-                 FROM positions p JOIN departments d ON d.id=p.department_id
-                 WHERE p.hotel_name=:h ORDER BY d.name,p.name""", {"h": hotel})
+def schedule_range(hotel,s,e):
+    return Q("SELECT emp.name,emp.department,emp.role,sc.day,sc.shift_type FROM schedule sc JOIN employee emp ON emp.id=sc.emp_id AND emp.hotel_name=:h WHERE sc.hotel_name=:h AND sc.day BETWEEN :s AND :e ORDER BY sc.day,emp.department,emp.name",{"h":hotel,"s":str(s),"e":str(e)})
 
-def fetch_existing_schedule(hotel: str, s: date, e: date) -> pd.DataFrame:
-    return _q("""SELECT emp.name,emp.department,emp.role,sc.day,sc.shift_type
-                 FROM schedule sc JOIN employee emp ON emp.id=sc.emp_id AND emp.hotel_name=:h
-                 WHERE sc.hotel_name=:h AND sc.day BETWEEN :s AND :e
-                 ORDER BY sc.day,emp.department,emp.name""",
-              {"h": hotel, "s": str(s), "e": str(e)})
+def labor(hotel,s,e):
+    p={"h":hotel,"s":str(s),"e":str(e)}; base="hotel_name=:h AND date BETWEEN :s AND :e"
+    out={}
+    out["totals"]=Q(f"SELECT COALESCE(SUM(hours),0) total_hours,COALESCE(SUM(ot_hours),0) total_ot,COALESCE(SUM(reg_pay),0) reg_pay,COALESCE(SUM(ot_pay),0) ot_pay,COUNT(DISTINCT emp_id) unique_emp,COUNT(DISTINCT date) active_days FROM actual WHERE {base}",p)
+    out["by_dept"]=Q(f"SELECT e.department,COALESCE(SUM(a.hours),0) total_hours,COALESCE(SUM(a.ot_hours),0) ot_hours,COALESCE(SUM(a.reg_pay),0) reg_pay,COALESCE(SUM(a.ot_pay),0) ot_pay,COUNT(DISTINCT a.emp_id) employees FROM actual a JOIN employee e ON e.id=a.emp_id AND e.hotel_name=:h WHERE a.{base} GROUP BY e.department ORDER BY total_hours DESC",p)
+    out["top_emp"]=Q(f"SELECT e.name,e.department,e.role,COALESCE(SUM(a.hours),0) total_hours,COALESCE(SUM(a.ot_hours),0) ot_hours,COALESCE(SUM(a.reg_pay+a.ot_pay),0) total_pay FROM actual a JOIN employee e ON e.id=a.emp_id AND e.hotel_name=:h WHERE a.{base} GROUP BY e.name,e.department,e.role ORDER BY ot_hours DESC,total_hours DESC LIMIT 20",p)
+    out["daily"]=Q(f"SELECT date,COALESCE(SUM(hours),0) total_hours,COALESCE(SUM(ot_hours),0) ot_hours,COALESCE(SUM(reg_pay+ot_pay),0) total_cost FROM actual WHERE {base} GROUP BY date ORDER BY date",p)
+    out["ot_risk"]=Q(f"SELECT e.name,e.department,e.hourly_rate,COALESCE(SUM(a.hours),0) hrs_to_date,COALESCE(SUM(a.ot_hours),0) ot_hrs FROM actual a JOIN employee e ON e.id=a.emp_id AND e.hotel_name=:h WHERE a.{base} GROUP BY e.name,e.department,e.hourly_rate HAVING COALESCE(SUM(a.hours),0)>=35 ORDER BY hrs_to_date DESC",p)
+    return out
 
-def fetch_labor(hotel: str, s: date, e: date) -> dict:
-    p = {"h": hotel, "s": str(s), "e": str(e)}
-    base = "hotel_name=:h AND date BETWEEN :s AND :e"
-    res = {}
-    res["totals"] = _q(f"SELECT COALESCE(SUM(hours),0) total_hours,COALESCE(SUM(ot_hours),0) total_ot,"
-                        f"COALESCE(SUM(reg_pay),0) reg_pay,COALESCE(SUM(ot_pay),0) ot_pay,"
-                        f"COUNT(DISTINCT emp_id) unique_emp,COUNT(DISTINCT date) active_days "
-                        f"FROM actual WHERE {base}", p)
-    res["by_dept"] = _q(f"""SELECT e.department,
-        COALESCE(SUM(a.hours),0) total_hours,COALESCE(SUM(a.ot_hours),0) ot_hours,
-        COALESCE(SUM(a.reg_pay),0) reg_pay,COALESCE(SUM(a.ot_pay),0) ot_pay,
-        COUNT(DISTINCT a.emp_id) employees
-        FROM actual a JOIN employee e ON e.id=a.emp_id AND e.hotel_name=:h
-        WHERE a.{base} GROUP BY e.department ORDER BY total_hours DESC""", p)
-    res["top_emp"] = _q(f"""SELECT e.name,e.department,e.role,
-        COALESCE(SUM(a.hours),0) total_hours,COALESCE(SUM(a.ot_hours),0) ot_hours,
-        COALESCE(SUM(a.reg_pay+a.ot_pay),0) total_pay
-        FROM actual a JOIN employee e ON e.id=a.emp_id AND e.hotel_name=:h
-        WHERE a.{base} GROUP BY e.name,e.department,e.role
-        ORDER BY ot_hours DESC,total_hours DESC LIMIT 20""", p)
-    res["daily"] = _q(f"""SELECT date,COALESCE(SUM(hours),0) total_hours,
-        COALESCE(SUM(ot_hours),0) ot_hours,COALESCE(SUM(reg_pay+ot_pay),0) total_cost
-        FROM actual WHERE {base} GROUP BY date ORDER BY date""", p)
-    return res
+def rooms_data(hotel,s,e):
+    try:
+        p={"h":hotel,"s":str(s),"e":str(e)}
+        r=Q("SELECT date,rooms_sold,rooms_avail,occ_pct,adr,revpar FROM room_kpis WHERE hotel_name=:h AND date BETWEEN :s AND :e ORDER BY date",p)
+        return r
+    except Exception: return pd.DataFrame()
 
+def labor_standards(hotel):
+    try: return Q("SELECT * FROM labor_standards WHERE hotel_name=:h",{"h":hotel})
+    except Exception: return pd.DataFrame()
 
-# ─────────────────────────── Build prompt ────────────────────────────────────
-def build_prompt(hotel, start, end, question, data, intents, emps, positions, sched) -> str:
-    days = (end - start).days + 1
-    day_labels = [(start + timedelta(i)).strftime("%a %b %d") for i in range(days)]
-    period = f"{start.strftime('%b %d')} – {end.strftime('%b %d, %Y')}"
+def planning(hotel,s,e):
+    try: return Q("SELECT * FROM planning_summary WHERE hotel_name=:h AND date BETWEEN :s AND :e ORDER BY date",{"h":hotel,"s":str(s),"e":str(e)})
+    except Exception: return pd.DataFrame()
 
-    sections = []
-    if not emps.empty:
-        sections.append("FULL EMPLOYEE ROSTER:\n" + emps.to_string(index=False))
-    if not positions.empty:
-        sections.append("POSITIONS BY DEPT:\n" + positions.to_string(index=False))
-    if not sched.empty:
-        sections.append(f"EXISTING SCHEDULE ({period}):\n" + sched.to_string(index=False))
-    else:
-        sections.append(f"EXISTING SCHEDULE ({period}): None — create new mockup.")
+# ─── prompt builder ───────────────────────────────────────────────────────────
+def build_prompt(hotel,start,end,question,data,intents,emps,pos,sched,rooms_df,standards_df) -> str:
+    days=(end-start).days+1
+    day_labels=[(start+timedelta(i)).strftime("%a %b %d") for i in range(days)]
+    period=f"{start.strftime('%b %d')} – {end.strftime('%b %d, %Y')}"
+    q_low=question.lower()
 
-    tot = data.get("totals", pd.DataFrame())
-    if not tot.empty and float(tot.iloc[0].get("total_hours", 0)) > 0:
-        r = tot.iloc[0]
-        th = float(r["total_hours"]); ot = float(r["total_ot"]); rp = float(r["reg_pay"]); op = float(r["ot_pay"])
-        sections.append(f"LABOR ACTUALS ({period}):\n"
-                        f"- Hours: {th:,.1f}  OT: {ot:,.1f} ({ot/th*100:.1f}% of total)\n"
-                        f"- Reg Pay: ${rp:,.2f}  OT Pay: ${op:,.2f}  Total: ${rp+op:,.2f}")
+    secs=[]
+    if not emps.empty:   secs.append("EMPLOYEE ROSTER:\n"+emps.to_string(index=False))
+    if not pos.empty:    secs.append("POSITIONS/DEPTS:\n"+pos.to_string(index=False))
+    if not sched.empty:  secs.append(f"EXISTING SCHEDULE ({period}):\n"+sched.to_string(index=False))
+    else:                secs.append(f"EXISTING SCHEDULE ({period}): None — create new mockup if asked.")
 
-    bd = data.get("by_dept", pd.DataFrame())
-    if not bd.empty: sections.append("DEPT BREAKDOWN:\n" + bd.to_string(index=False))
-    te = data.get("top_emp", pd.DataFrame())
-    if not te.empty: sections.append("EMPLOYEE DETAIL:\n" + te.to_string(index=False))
-    dl = data.get("daily", pd.DataFrame())
-    if not dl.empty and len(dl) <= 14: sections.append("DAILY:\n" + dl.to_string(index=False))
+    tot=data.get("totals",pd.DataFrame())
+    if not tot.empty and float(tot.iloc[0].get("total_hours",0))>0:
+        r=tot.iloc[0]; th=float(r["total_hours"]); ot=float(r["total_ot"]); rp=float(r["reg_pay"]); op=float(r["ot_pay"])
+        secs.append(f"LABOR ACTUALS ({period}):\n- Hours:{th:,.1f}  OT:{ot:,.1f}({ot/th*100:.1f}%)\n- Reg Pay:${rp:,.2f}  OT Pay:${op:,.2f}  Total:${rp+op:,.2f}")
 
-    data_block = "\n\n".join(sections)
-    is_sched = "schedule_mockup" in intents
+    bd=data.get("by_dept",pd.DataFrame())
+    if not bd.empty: secs.append("BY DEPARTMENT:\n"+bd.to_string(index=False))
+    te=data.get("top_emp",pd.DataFrame())
+    if not te.empty: secs.append("EMPLOYEE DETAIL:\n"+te.to_string(index=False))
+    dl=data.get("daily",pd.DataFrame())
+    if not dl.empty and len(dl)<=14: secs.append("DAILY BREAKDOWN:\n"+dl.to_string(index=False))
+    ri=data.get("ot_risk",pd.DataFrame())
+    if not ri.empty: secs.append("OT RISK (employees ≥35h):\n"+ri.to_string(index=False))
+    if not rooms_df.empty: secs.append(f"ROOM KPIs ({period}):\n"+rooms_df.to_string(index=False))
+    if not standards_df.empty: secs.append("LABOR STANDARDS:\n"+standards_df.to_string(index=False))
+
+    block="\n\n".join(secs)
 
     # Detect dept filter
-    dept_filter = ""
-    ql = question.lower()
+    dept=""
     for kw in ["housekeeping","front desk","food & beverage","f&b","engineering",
-               "guest service","maintenance","security","spa","finance"]:
-        if kw in ql: dept_filter = kw.title(); break
+               "guest service","maintenance","security","spa","banquet","finance"]:
+        if kw in q_low: dept=kw.title(); break
 
+    is_sched="schedule" in intents
     if is_sched:
-        col_csv = ",".join(day_labels)
-        dept_note = f" Include ONLY the {dept_filter} department." if dept_filter else " Include all departments."
-        sched_rule = f"""
-CRITICAL — USER WANTS AN ACTUAL SCHEDULE TABLE WITH REAL EMPLOYEE NAMES.{dept_note}
+        col_csv=",".join(day_labels)
+        dnote=f" Include ONLY {dept} dept." if dept else " Include ALL departments."
+        sched_block=f"""
+CRITICAL: USER WANTS AN ACTUAL SCHEDULE TABLE WITH REAL NAMES FROM THE ROSTER.{dnote}
 
-YOUR RESPONSE MUST FOLLOW THIS EXACT FORMAT AND NOTHING ELSE:
+RESPOND IN EXACTLY THIS FORMAT:
 
-One opening sentence here.
+Opening sentence (plain text).
 
 <<<TABLE_START>>>
 Employee Name,Department,Role,{col_csv}
-FirstName LastName,Department,Role,AM,PM,OFF,RDO,AM,PM,OFF
-(one row per relevant employee — use ONLY real names from the FULL EMPLOYEE ROSTER)
+[Use real employee names from the EMPLOYEE ROSTER above — one row per relevant employee]
 <<<TABLE_END>>>
 
-2-3 sentence staffing note for leadership.
+2-3 sentence staffing leadership note.
 
-RULES:
-- Use only real names from the employee roster. Never invent names.
-- Shift codes only inside table: AM | PM | MID | NT | OFF | RDO
-- Every employee must appear (filtered by dept if requested).
-- At least 2 days off per 7-day week per employee.
-- Table must be valid CSV — no extra commas, same number of columns every row.
+RULES FOR THE TABLE:
+- Only real names from the EMPLOYEE ROSTER. Never invent names.
+- Shift codes: AM | PM | MID | NT | OFF | RDO only.
+- Minimum 2 days off per 7-day period per person.
+- Valid CSV — same number of columns every row. No quotes unless name has comma.
 """
     else:
-        sched_rule = ""
+        sched_block=""
 
-    return f"""You are the most capable hotel labor analytics AI. You have FULL access to the live database below.
+    return f"""You are LaborPilot's AI — the smartest hotel labor intelligence system available.
+You have COMPLETE ACCESS to the hotel's live database for {hotel}.
+You answer EXACTLY what is asked using real names, real numbers from the data below.
 
 HOTEL: {hotel}
 PERIOD: {period}
 QUESTION: "{question}"
-{sched_rule}
+{sched_block}
+=== LIVE DATABASE ===
+{block}
 
-=== LIVE DATA ===
-{data_block}
+=== RESPONSE RULES (non-schedule) ===
+- Use real names and numbers from the data above.
+- First sentence: the single most important number or finding.
+- 2-3 numbered bullet points with specifics.
+- End: one "Bottom Line:" sentence — what to act on now.
+- Max 220 words. No markdown headers. Plain conversational language.
+- If the data is empty for the period, say so honestly and suggest checking a different date range."""
 
-=== RULES (non-schedule) ===
-- Use real employee names and real numbers from the data.
-- Lead with the most important number/finding first.
-- Give 2-3 numbered action items.
-- End with one "Bottom Line" sentence.
-- Under 250 words."""
-
-
-# ─────────────────────────── Table parser ────────────────────────────────────
-def extract_table(raw: str):
-    m = re.search(r"<<<TABLE_START>>>(.*?)<<<TABLE_END>>>", raw, re.DOTALL)
-    if not m:
-        return None, raw
-    csv_txt = m.group(1).strip()
-    rest    = (raw[:m.start()] + "\n" + raw[m.end():]).strip()
+# ─── table parser ─────────────────────────────────────────────────────────────
+def extract_table(raw):
+    m=re.search(r"<<<TABLE_START>>>(.*?)<<<TABLE_END>>>",raw,re.DOTALL)
+    if not m: return None,raw
+    rest=(raw[:m.start()]+"\n"+raw[m.end():]).strip()
     try:
-        df = pd.read_csv(io.StringIO(csv_txt))
-        df.columns = [c.strip() for c in df.columns]
-        for col in df.select_dtypes("object").columns:
-            df[col] = df[col].str.strip()
-        return df, rest
-    except Exception:
-        return None, raw
+        df=pd.read_csv(io.StringIO(m.group(1).strip()))
+        df.columns=[c.strip() for c in df.columns]
+        for c in df.select_dtypes("object").columns: df[c]=df[c].str.strip()
+        return df,rest
+    except: return None,raw
 
+# ─── AI call ──────────────────────────────────────────────────────────────────
+def call_ai(prompt):
+    key=os.environ.get("GROQ_API_KEY","")
+    if not key: return "GROQ_API_KEY not configured."
+    cl=Groq(api_key=key)
+    r=cl.chat.completions.create(model="llama-3.3-70b-versatile",
+        messages=[{"role":"user","content":prompt}],temperature=0.3,max_tokens=1500)
+    return r.choices[0].message.content.strip()
 
-# ─────────────────────────── Groq call ──────────────────────────────────────
-def call_ai(prompt: str) -> str:
-    key = os.environ.get("GROQ_API_KEY", "")
-    if not key:
-        return "GROQ_API_KEY not configured. Add it in Secrets."
-    client = Groq(api_key=key)
-    resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.35,
-        max_tokens=1400,
-    )
-    return resp.choices[0].message.content.strip()
-
-
-# ─────────────────────────── Charts ──────────────────────────────────────────
-def render_charts(data: dict, intents: list):
-    bd = data.get("by_dept", pd.DataFrame())
-    dl = data.get("daily", pd.DataFrame())
-    te = data.get("top_emp", pd.DataFrame())
-    C1="#3D52A0"; C2="#2196F3"; OT="#FF5722"
-    base = dict(template="plotly_white", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                margin=dict(t=40,b=30,l=10,r=10), title_font=dict(size=13,color="#3D52A0"),
-                font=dict(color="#444",size=11))
-    cols = st.columns(2); c = 0
+# ─── charts ───────────────────────────────────────────────────────────────────
+def render_charts(data,intents):
+    bd=data.get("by_dept",pd.DataFrame()); dl=data.get("daily",pd.DataFrame())
+    te=data.get("top_emp",pd.DataFrame()); ri=data.get("ot_risk",pd.DataFrame())
+    base=dict(template="plotly_white",paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
+              margin=dict(t=36,b=24,l=8,r=8),title_font=dict(size=13,color=PRIMARY),font=dict(color=TXT2,size=11))
+    cols=st.columns(2); c=0
 
     if not bd.empty:
         with cols[c%2]:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=bd["department"],y=bd["total_hours"],name="Reg Hours",marker_color=C1,opacity=0.85))
-            fig.add_trace(go.Bar(x=bd["department"],y=bd["ot_hours"],name="OT Hours",marker_color=OT,opacity=0.9))
-            fig.update_layout(**base,title="Hours by Department",barmode="stack",
-                              legend=dict(orientation="h",y=1.12),xaxis_tickangle=-25)
-            st.plotly_chart(fig,use_container_width=True)
-        c += 1
+            f=go.Figure()
+            f.add_trace(go.Bar(x=bd["department"],y=bd["total_hours"],name="Reg Hours",marker_color=PRIMARY,opacity=0.8))
+            f.add_trace(go.Bar(x=bd["department"],y=bd["ot_hours"],name="OT Hours",marker_color=RED,opacity=0.85))
+            f.update_layout(**base,title="Hours by Department",barmode="stack",
+                            legend=dict(orientation="h",y=1.1,x=0),xaxis_tickangle=-30)
+            st.plotly_chart(f,use_container_width=True); c+=1
         if "cost" in intents:
             with cols[c%2]:
-                fig2 = go.Figure()
-                fig2.add_trace(go.Bar(x=bd["department"],y=bd["reg_pay"],name="Reg Pay",marker_color=C2,opacity=0.85))
-                fig2.add_trace(go.Bar(x=bd["department"],y=bd["ot_pay"],name="OT Pay",marker_color=OT,opacity=0.9))
-                fig2.update_layout(**base,title="Labor Cost by Dept",barmode="stack",
-                                   legend=dict(orientation="h",y=1.12),xaxis_tickangle=-25)
-                st.plotly_chart(fig2,use_container_width=True)
-            c += 1
+                f2=go.Figure()
+                f2.add_trace(go.Bar(x=bd["department"],y=bd["reg_pay"],name="Reg Pay",marker_color=BLUE,opacity=0.8))
+                f2.add_trace(go.Bar(x=bd["department"],y=bd["ot_pay"],name="OT Pay",marker_color=RED,opacity=0.85))
+                f2.update_layout(**base,title="Cost by Department",barmode="stack",
+                                 legend=dict(orientation="h",y=1.1,x=0),xaxis_tickangle=-30)
+                st.plotly_chart(f2,use_container_width=True); c+=1
 
     if not dl.empty:
         with cols[c%2]:
-            fig3 = go.Figure()
-            fig3.add_trace(go.Scatter(x=dl["date"],y=dl["total_hours"],mode="lines+markers",name="Total Hrs",
-                                      line=dict(color=C1,width=2.5),fill="tozeroy",fillcolor="rgba(61,82,160,0.07)"))
-            fig3.add_trace(go.Scatter(x=dl["date"],y=dl["ot_hours"],mode="lines+markers",name="OT Hrs",
-                                      line=dict(color=OT,width=2,dash="dot")))
-            fig3.update_layout(**base,title="Daily Hours Trend",legend=dict(orientation="h",y=1.12))
-            st.plotly_chart(fig3,use_container_width=True)
-        c += 1
+            f3=go.Figure()
+            f3.add_trace(go.Scatter(x=dl["date"],y=dl["total_hours"],name="Hours",
+                                    line=dict(color=PRIMARY,width=2.5),fill="tozeroy",fillcolor="rgba(61,82,160,0.06)"))
+            f3.add_trace(go.Scatter(x=dl["date"],y=dl["ot_hours"],name="OT",
+                                    line=dict(color=RED,width=2,dash="dot")))
+            f3.update_layout(**base,title="Daily Hours Trend",legend=dict(orientation="h",y=1.1))
+            st.plotly_chart(f3,use_container_width=True); c+=1
 
-    ot_e = te[te["ot_hours"]>0].head(8) if not te.empty else pd.DataFrame()
-    if not ot_e.empty:
+    ot_e=ri if not ri.empty else (te[te["ot_hours"]>0].head(8) if not te.empty else pd.DataFrame())
+    if not ot_e.empty and "ot_hours" in ot_e.columns:
         with cols[c%2]:
-            fig4 = go.Figure(go.Bar(x=ot_e["ot_hours"],y=ot_e["name"],orientation="h",
-                marker=dict(color=ot_e["ot_hours"],colorscale=[[0,C1],[1,OT]],showscale=False),
+            ot_e=ot_e.head(8).sort_values("ot_hours")
+            f4=go.Figure(go.Bar(x=ot_e["ot_hours"],y=ot_e["name"],orientation="h",
+                marker=dict(color=ot_e["ot_hours"],colorscale=[[0,PRIMARY],[1,RED]],showscale=False),
                 text=ot_e["ot_hours"].apply(lambda v:f"{v:.1f}h"),textposition="inside"))
-            fig4.update_layout(**base,title="Top OT Employees",yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig4,use_container_width=True)
+            f4.update_layout(**base,title="OT Risk by Employee",yaxis=dict(autorange="reversed"))
+            st.plotly_chart(f4,use_container_width=True); c+=1
 
+# ─── email ────────────────────────────────────────────────────────────────────
+def do_email(recips,hotel,question,summary,period,data,sched_df):
+    tot=data.get("totals",pd.DataFrame()); bd=data.get("by_dept",pd.DataFrame())
+    te=data.get("top_emp",pd.DataFrame()); r=tot.iloc[0] if not tot.empty else {}
+    th=float(r.get("total_hours",0)); ot=float(r.get("total_ot",0))
+    rp=float(r.get("reg_pay",0)); op=float(r.get("ot_pay",0))
+    lines=[f"AIPilot Labor Report — {hotel}",f"Period: {period}","="*60,"",
+           f"QUESTION: {question}","","AI SUMMARY:",summary,""]
+    if sched_df is not None: lines+=["SCHEDULE:",sched_df.to_string(index=False),""]
+    if th>0: lines+=["METRICS:",f"  Hours:{th:,.1f}  OT:{ot:,.1f}  Cost:${rp+op:,.2f}  OT Pay:${op:,.2f}",""]
+    if not bd.empty: lines+=["BY DEPT:",bd.to_string(index=False),""]
+    if not te.empty: lines+=["TOP EMPLOYEES:",te.head(10).to_string(index=False),""]
+    lines.append(f"— LaborPilot AIPilot · {date.today().strftime('%B %d, %Y')}")
+    send_email(recips,f"AIPilot Report — {hotel} | {period}","\n".join(lines))
 
-# ─────────────────────────── Main render ─────────────────────────────────────
+# ═══════════════════════════ MAIN RENDER ═════════════════════════════════════
 def render_aipilot(hotel: str):
 
-    # ── Init session state keys ──
-    for k, v in [("ai_q",""), ("ai_result",None), ("ai_data",None),
-                  ("ai_intents",[]), ("ai_period",""), ("ai_sched_df",None),
-                  ("ai_fill","")]:
-        if k not in st.session_state:
-            st.session_state[k] = v
+    # ── session init ──
+    for k,v in [("ai_q",""),("ai_result",None),("ai_data",None),
+                 ("ai_intents",[]),("ai_period",""),("ai_sched",None),
+                 ("ai_start",None),("ai_end",None),("ai_fill","")]:
+        if k not in st.session_state: st.session_state[k]=v
 
-    LOGO = _logo_b64()
+    LOGO=_logo()
 
-    # ── CSS — remove Streamlit's blue top bar, clean layout ──
-    st.markdown("""
+    # ── pre-fill suggestion ──
+    if st.session_state.ai_fill:
+        st.session_state["_q"]=st.session_state.ai_fill
+        st.session_state.ai_fill=""
+
+    # ════════════════════════ CSS ═════════════════════════════════════════════
+    st.markdown(f"""
     <style>
-    /* Remove blue Streamlit header */
-    header[data-testid="stHeader"] { background: #ffffff !important; box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important; }
-    header[data-testid="stHeader"] * { color: #444 !important; }
-    div[data-testid="stToolbar"] { display:none !important; }
+    /* Page background */
+    .stApp, .main .block-container {{ background:{LIGHT_BG} !important; padding-top:0 !important; }}
+    .block-container {{ max-width:900px !important; padding:0 2rem 4rem 2rem !important; }}
 
-    .ai-hero {
-        background: linear-gradient(135deg, #3D52A0 0%, #5C6FBF 55%, #8697C4 100%);
-        border-radius: 14px; padding: 24px 30px 20px; margin-bottom: 18px;
-        box-shadow: 0 4px 20px rgba(61,82,160,0.2);
-    }
-    .ai-logo-row { display:flex; align-items:center; gap:10px; margin-bottom:4px; }
-    .ai-logo-row img { height:34px; filter:brightness(0) invert(1); }
-    .ai-title { font-size:24px; font-weight:900; color:#fff; letter-spacing:-0.5px; }
-    .ai-subtitle { color:rgba(255,255,255,0.75); font-size:12.5px; margin-top:2px; }
-    .ai-live-badge {
+    /* Hide Streamlit chrome */
+    header[data-testid="stHeader"] {{
+        background:#ffffff !important;
+        border-bottom:1px solid {BORDER} !important;
+        box-shadow:0 1px 4px rgba(0,0,0,0.04) !important;
+    }}
+    div[data-testid="stToolbar"], #MainMenu {{ display:none !important; }}
+    footer {{ display:none !important; }}
+
+    /* ── HERO CARD ── */
+    .ai-hero {{
+        background:#ffffff;
+        border:1px solid {BORDER};
+        border-radius:16px;
+        padding:28px 32px 24px;
+        margin:20px 0 18px 0;
+        box-shadow:0 1px 8px rgba(0,0,0,0.05);
+        display:flex; align-items:center; justify-content:space-between;
+    }}
+    .ai-hero-left {{ display:flex; align-items:center; gap:14px; }}
+    .ai-hero-logo {{ height:42px; width:auto; }}
+    .ai-hero-text .title {{
+        font-size:24px; font-weight:800; color:{TXT};
+        letter-spacing:-0.5px; line-height:1.1;
+    }}
+    .ai-hero-text .sub {{
+        font-size:12.5px; color:{TXT2}; margin-top:3px;
+    }}
+    .ai-hero-right {{ text-align:right; }}
+    .ai-badge {{
         display:inline-flex; align-items:center; gap:5px;
-        background:rgba(255,255,255,0.15); border:1px solid rgba(255,255,255,0.3);
-        border-radius:20px; padding:3px 10px; font-size:11px; color:#fff; font-weight:600;
-    }
-    .ai-live-dot { width:6px;height:6px;border-radius:50%;background:#4CAF50;
-        animation:aipulse 1.6s ease-in-out infinite;display:inline-block; }
-    @keyframes aipulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.3;transform:scale(0.7)}}
-    .ai-hero-row { display:flex;justify-content:space-between;align-items:flex-start; }
-    .ai-hero-desc { margin-top:10px; color:rgba(255,255,255,0.62); font-size:12.5px; line-height:1.6; }
+        background:#f0f4ff; border:1px solid #c7d2fe;
+        border-radius:20px; padding:4px 12px;
+        font-size:11px; color:{PRIMARY}; font-weight:600;
+    }}
+    .ai-badge-dot {{
+        width:6px; height:6px; border-radius:50%; background:#22c55e;
+        display:inline-block; animation:pulse 1.8s ease-in-out infinite;
+    }}
+    @keyframes pulse{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:0.3;transform:scale(0.65)}}}}
+    .ai-hotel-name {{
+        font-size:11px; color:{TXT2}; margin-top:5px;
+        white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px;
+    }}
 
-    .ai-sug-row { display:flex; flex-wrap:wrap; gap:6px; margin: 8px 0 12px 0; }
-    .ai-response-card {
-        background:#f8f9ff; border:1px solid #e0e4f0; border-left:4px solid #3D52A0;
-        border-radius:10px; padding:18px 22px; margin:10px 0 12px 0;
-        font-size:14px; line-height:1.8; color:#1a1a2e; white-space:pre-wrap;
-        box-shadow:0 2px 10px rgba(61,82,160,0.07);
-    }
-    .ai-model-tag {
-        display:inline-flex; align-items:center; gap:6px;
-        background:linear-gradient(135deg,#3D52A0,#8697C4);
-        border-radius:20px; padding:3px 12px; font-size:11px; color:#fff; font-weight:600; margin-bottom:8px;
-    }
-    .ai-metrics-row { display:flex;flex-wrap:wrap;gap:10px;margin:12px 0 4px 0; }
-    .ai-metric { background:#f0f4ff;border:1px solid #d0d8f5;border-radius:10px;padding:10px 16px;min-width:105px;text-align:center; }
-    .ai-metric .val { font-size:19px;font-weight:800;color:#3D52A0;line-height:1.2; }
-    .ai-metric .val.red { color:#FF5722; }
-    .ai-metric .val.teal { color:#2196F3; }
-    .ai-metric .lbl { font-size:10px;color:#888;margin-top:2px; }
-    .ai-period-pill {
-        display:inline-flex;align-items:center;gap:4px;
-        background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;
-        padding:4px 12px;font-size:11px;color:#3D52A0;margin-bottom:10px;
-    }
-    .ai-tbl-hdr { color:#3D52A0;font-size:12px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;margin:16px 0 4px 0; }
-    .ai-chart-hdr { color:#3D52A0;font-size:12px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;margin:18px 0 4px 0; }
-    .ai-divider { height:1px;background:linear-gradient(90deg,#3D52A0,transparent);opacity:0.15;margin-bottom:10px; }
-    .ai-email-box { background:#f0f4ff;border:1px solid #c7d2fe;border-radius:10px;padding:16px 20px;margin-top:18px; }
-    .ai-empty { background:#f8f9ff;border:1px dashed #c7d2fe;border-radius:12px;padding:40px 24px;text-align:center;margin-top:6px; }
-    .ai-empty-icon { font-size:38px;margin-bottom:10px; }
-    .ai-empty-title { color:#3D52A0;font-size:14px;font-weight:700;margin-bottom:4px; }
-    .ai-empty-sub { color:#888;font-size:12.5px; }
-    /* Input field */
-    div[data-testid="stTextInput"] > div > div > input {
-        border:1.5px solid #c7d2fe !important; border-radius:10px !important;
-        font-size:14px !important; padding:11px 15px !important;
-    }
-    div[data-testid="stTextInput"] > div > div > input:focus {
-        border-color:#3D52A0 !important; box-shadow:0 0 0 3px rgba(61,82,160,0.09) !important;
-    }
-    /* Suggestion buttons styling */
-    div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {
-        border-radius: 20px !important; font-size:11.5px !important;
-        padding: 4px 12px !important; height: auto !important;
-    }
+    /* ── SEARCH AREA ── */
+    .ai-search-label {{
+        font-size:13px; font-weight:600; color:{TXT2};
+        text-transform:uppercase; letter-spacing:0.6px;
+        margin-bottom:8px;
+    }}
+    div[data-testid="stTextInput"] > div > div > input {{
+        background:#ffffff !important;
+        border:1.5px solid {BORDER} !important;
+        border-radius:12px !important;
+        font-size:15px !important;
+        padding:13px 18px !important;
+        color:{TXT} !important;
+        box-shadow:0 1px 4px rgba(0,0,0,0.04) !important;
+        transition:border-color 0.15s, box-shadow 0.15s !important;
+    }}
+    div[data-testid="stTextInput"] > div > div > input:focus {{
+        border-color:{PRIMARY} !important;
+        box-shadow:0 0 0 3px rgba(61,82,160,0.08) !important;
+    }}
+    div[data-testid="stTextInput"] > div > div > input::placeholder {{
+        color:#94a3b8 !important;
+    }}
+
+    /* ── SUGGESTION CHIPS ── */
+    .sug-wrap {{ display:flex; flex-wrap:wrap; gap:7px; margin:10px 0 6px 0; }}
+    div[data-testid="stButton"] button[kind="secondary"] {{
+        background:#ffffff !important;
+        border:1px solid {BORDER} !important;
+        border-radius:20px !important;
+        color:{TXT2} !important;
+        font-size:12px !important;
+        padding:5px 14px !important;
+        box-shadow:0 1px 3px rgba(0,0,0,0.05) !important;
+        transition:all 0.15s !important;
+        height:auto !important;
+    }}
+    div[data-testid="stButton"] button[kind="secondary"]:hover {{
+        border-color:{PRIMARY} !important;
+        color:{PRIMARY} !important;
+        box-shadow:0 2px 8px rgba(61,82,160,0.12) !important;
+    }}
+
+    /* ── RESULT CARD ── */
+    .ai-card {{
+        background:#ffffff;
+        border:1px solid {BORDER};
+        border-radius:14px;
+        padding:22px 26px;
+        margin:14px 0 12px 0;
+        box-shadow:0 2px 10px rgba(0,0,0,0.05);
+    }}
+    .ai-card-header {{
+        display:flex; align-items:center; justify-content:space-between;
+        margin-bottom:14px;
+    }}
+    .ai-model-pill {{
+        display:inline-flex; align-items:center; gap:5px;
+        background:#f0f4ff; border:1px solid #c7d2fe;
+        border-radius:20px; padding:3px 11px;
+        font-size:11px; color:{PRIMARY}; font-weight:600;
+    }}
+    .ai-response {{
+        font-size:14.5px; line-height:1.85; color:{TXT};
+        white-space:pre-wrap;
+    }}
+
+    /* ── KPI PILLS ── */
+    .kpi-row {{ display:flex; flex-wrap:wrap; gap:9px; margin:12px 0; }}
+    .kpi-pill {{
+        background:#ffffff; border:1px solid {BORDER};
+        border-radius:10px; padding:10px 16px; min-width:100px; text-align:center;
+        box-shadow:0 1px 3px rgba(0,0,0,0.04);
+    }}
+    .kpi-val {{ font-size:18px; font-weight:800; color:{PRIMARY}; line-height:1.2; }}
+    .kpi-val.r {{ color:{RED}; }}
+    .kpi-val.b {{ color:{BLUE}; }}
+    .kpi-val.g {{ color:#16a34a; }}
+    .kpi-lbl {{ font-size:10px; color:{TXT2}; margin-top:2px; }}
+
+    /* ── PERIOD PILL ── */
+    .period-pill {{
+        display:inline-flex; align-items:center; gap:5px;
+        background:#f8faff; border:1px solid #dde4f7;
+        border-radius:8px; padding:4px 12px;
+        font-size:11px; color:{PRIMARY}; margin-bottom:10px; font-weight:500;
+    }}
+
+    /* ── SECTION HEADER ── */
+    .sec-hdr {{
+        font-size:11.5px; font-weight:700; color:{TXT2};
+        text-transform:uppercase; letter-spacing:0.6px;
+        margin:20px 0 6px 0; padding-bottom:6px;
+        border-bottom:1px solid {BORDER};
+    }}
+
+    /* ── SCHEDULE TABLE ── */
+    .sched-legend {{ display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 12px 0; }}
+    .sched-chip {{
+        display:inline-flex; align-items:center; gap:5px;
+        border-radius:6px; padding:3px 10px; font-size:11px; font-weight:600;
+    }}
+
+    /* ── EMAIL BOX ── */
+    .email-box {{
+        background:#f8faff; border:1px solid #dde4f7;
+        border-radius:12px; padding:18px 22px; margin-top:20px;
+    }}
+    .email-title {{ font-size:13px; font-weight:700; color:{PRIMARY}; margin-bottom:12px; }}
+
+    /* ── EMPTY STATE ── */
+    .empty-wrap {{
+        background:#ffffff; border:1px solid {BORDER};
+        border-radius:16px; padding:52px 32px;
+        text-align:center; margin:10px 0;
+        box-shadow:0 1px 6px rgba(0,0,0,0.04);
+    }}
+    .empty-icon {{ font-size:44px; margin-bottom:14px; }}
+    .empty-title {{ font-size:17px; font-weight:700; color:{TXT}; margin-bottom:6px; }}
+    .empty-sub {{ font-size:13px; color:{TXT2}; line-height:1.6; }}
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Hero ──
-    logo_img = f'<img src="data:image/png;base64,{LOGO}" />' if LOGO else ""
+    # ════════════════════════ HERO ═══════════════════════════════════════════
+    logo_img=(f'<img src="data:image/png;base64,{LOGO}" class="ai-hero-logo" />' if LOGO
+              else '<span style="font-size:28px">🤖</span>')
     st.markdown(f"""
     <div class="ai-hero">
-      <div class="ai-hero-row">
-        <div>
-          <div class="ai-logo-row">{logo_img}<div class="ai-title">AIPilot</div></div>
-          <div class="ai-subtitle">Labor Intelligence for {hotel}</div>
+      <div class="ai-hero-left">
+        {logo_img}
+        <div class="ai-hero-text">
+          <div class="title">AIPilot</div>
+          <div class="sub">Full-app labor intelligence · reads every table</div>
         </div>
-        <div class="ai-live-badge"><span class="ai-live-dot"></span> LIVE DATA</div>
       </div>
-      <div class="ai-hero-desc">
-        Ask anything — schedules, OT risk, costs, staff mockups, trends, reports.<br>
-        I read your full live database and respond with real names and real numbers.
+      <div class="ai-hero-right">
+        <div class="ai-badge"><span class="ai-badge-dot"></span> LIVE DATA</div>
+        <div class="ai-hotel-name">{hotel}</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Suggestion chips ──
-    SUGS = [
-        "Create a full schedule mockup for next week",
+    # ════════════════════════ SUGGESTIONS ════════════════════════════════════
+    SUGS=[
+        "Create a schedule mockup for all departments next week",
         "Who had the most OT this month?",
-        "Highest labor cost department this month",
-        "OT risk employees this week",
-        "Total labor cost summary last month",
+        "Top labor cost department — last 30 days",
+        "Show OT risk employees this week",
+        "Full labor cost summary this month",
     ]
-
-    # Pre-fill text input if suggestion was clicked last rerun
-    if st.session_state.ai_fill:
-        st.session_state["_ai_q_input"] = st.session_state.ai_fill
-        st.session_state.ai_fill = ""
-
-    sug_cols = st.columns(len(SUGS))
-    for i, sug in enumerate(SUGS):
+    sug_cols=st.columns(len(SUGS))
+    for i,s in enumerate(SUGS):
         with sug_cols[i]:
-            short = (sug[:22] + "…") if len(sug) > 22 else sug
-            if st.button(short, key=f"sug_{i}", help=sug, use_container_width=True):
-                st.session_state.ai_fill = sug
-                st.rerun()
+            short=(s[:20]+"…") if len(s)>20 else s
+            if st.button(short,key=f"sug_{i}",help=s,use_container_width=True):
+                st.session_state.ai_fill=s; st.rerun()
 
-    # ── Question input + Ask button ──
-    col_input, col_btn = st.columns([6, 1])
-    with col_input:
-        question = st.text_input(
-            "",
-            value=st.session_state.get("_ai_q_input", ""),
-            placeholder='e.g. "Create a mockup schedule for housekeeping next week" · "Who had the most OT?"',
-            label_visibility="collapsed",
-            key="_ai_q_input",
-        )
+    # ════════════════════════ SEARCH BAR ═════════════════════════════════════
+    st.markdown('<div class="ai-search-label">Ask AIPilot anything</div>', unsafe_allow_html=True)
+    col_q,col_btn=st.columns([7,1])
+    with col_q:
+        question=st.text_input("",
+            value=st.session_state.get("_q",""),
+            placeholder='e.g. "Make a schedule mockup for housekeeping next week" · "Who had OT last month?"',
+            label_visibility="collapsed", key="_q")
     with col_btn:
-        ask = st.button("Ask", type="primary", use_container_width=True)
+        ask=st.button("Ask →", type="primary", use_container_width=True)
 
-    # ── Decide whether to run AI ──
-    run_ai = ask and question.strip()
+    # ════════════════════════ LOGIC ═══════════════════════════════════════════
+    run=ask and question.strip()
 
-    # If new question → clear cached result
-    if run_ai and question.strip() != st.session_state.ai_q:
-        st.session_state.ai_result   = None
-        st.session_state.ai_sched_df = None
-        st.session_state.ai_data     = None
+    # Clear cache if new question
+    if run and question.strip()!=st.session_state.ai_q:
+        st.session_state.ai_result=None; st.session_state.ai_sched=None; st.session_state.ai_data=None
 
-    # Show empty state if nothing asked yet
+    # Empty state
     if not question.strip() and st.session_state.ai_result is None:
         st.markdown("""
-        <div class="ai-empty">
-          <div class="ai-empty-icon">🤖</div>
-          <div class="ai-empty-title">What do you want to know?</div>
-          <div class="ai-empty-sub">
-            Click a suggestion above or type a question.<br>
-            I can read every table in your database and answer anything.
+        <div class="empty-wrap">
+          <div class="empty-icon">🤖</div>
+          <div class="empty-title">What do you want to know?</div>
+          <div class="empty-sub">
+            Click a suggestion above or type your question and press <strong>Ask →</strong><br>
+            I have access to your schedules, costs, OT data, room stats, employee roster — everything.
           </div>
-        </div>
-        """, unsafe_allow_html=True)
+        </div>""", unsafe_allow_html=True)
         return
 
-    # ── Run AI (only when asked and question changed) ──
-    if run_ai and st.session_state.ai_result is None:
-        start_date, end_date = parse_dates(question)
-        intents = detect_intent(question)
-        days    = (end_date - start_date).days + 1
-        period  = f"{start_date.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}"
+    # Run AI
+    if run and st.session_state.ai_result is None:
+        s_date,e_date=parse_dates(question)
+        intents=detect(question)
 
-        with st.spinner("Reading your database…"):
+        with st.spinner("Reading database…"):
             try:
-                data     = fetch_labor(hotel, start_date, end_date)
-                emps     = fetch_employees(hotel)
-                pos      = fetch_positions(hotel)
-                ex_sched = fetch_existing_schedule(hotel, start_date, end_date)
-            except Exception as e:
-                st.error(f"Database error: {e}"); return
+                data=labor(hotel,s_date,e_date)
+                emps=employees(hotel); pos=positions(hotel)
+                sched=schedule_range(hotel,s_date,e_date)
+                rooms_df=rooms_data(hotel,s_date,e_date)
+                std_df=labor_standards(hotel)
+            except Exception as e: st.error(f"DB error: {e}"); return
 
         with st.spinner("Generating answer…"):
             try:
-                prompt = build_prompt(hotel, start_date, end_date, question,
-                                      data, intents, emps, pos, ex_sched)
-                raw    = call_ai(prompt)
-            except Exception as e:
-                st.error(f"AI error: {e}"); return
+                prompt=build_prompt(hotel,s_date,e_date,question,data,intents,emps,pos,sched,rooms_df,std_df)
+                raw=call_ai(prompt)
+            except Exception as e: st.error(f"AI error: {e}"); return
 
-        sched_df, summary = extract_table(raw)
+        sched_df,summary=extract_table(raw)
+        period=f"{s_date.strftime('%b %d')} – {e_date.strftime('%b %d, %Y')}"
 
-        # Cache everything
-        st.session_state.ai_q        = question
-        st.session_state.ai_result   = summary
-        st.session_state.ai_data     = data
-        st.session_state.ai_intents  = intents
-        st.session_state.ai_period   = period
-        st.session_state.ai_sched_df = sched_df
-        st.session_state.ai_start    = start_date
-        st.session_state.ai_end      = end_date
+        st.session_state.ai_q=question; st.session_state.ai_result=summary
+        st.session_state.ai_data=data;  st.session_state.ai_intents=intents
+        st.session_state.ai_period=period; st.session_state.ai_sched=sched_df
+        st.session_state.ai_start=s_date; st.session_state.ai_end=e_date
 
-    # ── Display cached result ──
-    if st.session_state.ai_result is None:
-        return
+    # ════════════════════════ DISPLAY ════════════════════════════════════════
+    if st.session_state.ai_result is None: return
 
-    summary     = st.session_state.ai_result
-    data        = st.session_state.ai_data
-    intents     = st.session_state.ai_intents
-    period      = st.session_state.ai_period
-    sched_df    = st.session_state.ai_sched_df
-    start_date  = st.session_state.get("ai_start")
-    end_date    = st.session_state.get("ai_end")
+    summary   = st.session_state.ai_result
+    data      = st.session_state.ai_data
+    intents   = st.session_state.ai_intents
+    period    = st.session_state.ai_period
+    sched_df  = st.session_state.ai_sched
+    s_date    = st.session_state.ai_start
+    e_date    = st.session_state.ai_end
 
-    if start_date and end_date:
-        days = (end_date - start_date).days + 1
-        st.markdown(f'<div class="ai-period-pill">◈ Period: {period} · {days} day{"s" if days!=1 else ""}</div>',
-                    unsafe_allow_html=True)
+    # Period pill
+    days=(e_date-s_date).days+1 if s_date and e_date else 0
+    st.markdown(f'<div class="period-pill">📅 {period} &nbsp;·&nbsp; {days} day{"s" if days!=1 else ""}</div>',
+                unsafe_allow_html=True)
 
     # KPI pills
-    tot = data.get("totals", pd.DataFrame()) if data else pd.DataFrame()
-    has_act = not tot.empty and float(tot.iloc[0].get("total_hours", 0)) > 0
+    tot=data.get("totals",pd.DataFrame()) if data else pd.DataFrame()
+    has_act=not tot.empty and float(tot.iloc[0].get("total_hours",0))>0
     if has_act:
-        r = tot.iloc[0]
-        th=float(r["total_hours"]); ot=float(r["total_ot"]); rp=float(r["reg_pay"]); op=float(r["ot_pay"])
-        ue=int(r["unique_emp"]); otp=(ot/th*100) if th>0 else 0
-        st.markdown(f"""<div class="ai-metrics-row">
-            <div class="ai-metric"><div class="val">{th:,.0f}</div><div class="lbl">Total Hours</div></div>
-            <div class="ai-metric"><div class="val red">{ot:,.1f}</div><div class="lbl">OT Hours ({otp:.1f}%)</div></div>
-            <div class="ai-metric"><div class="val teal">${rp+op:,.0f}</div><div class="lbl">Labor Cost</div></div>
-            <div class="ai-metric"><div class="val red">${op:,.0f}</div><div class="lbl">OT Pay</div></div>
-            <div class="ai-metric"><div class="val">{ue}</div><div class="lbl">Employees</div></div>
+        r=tot.iloc[0]
+        th=float(r["total_hours"]); ot=float(r["total_ot"])
+        rp=float(r["reg_pay"]); op=float(r["ot_pay"]); ue=int(r["unique_emp"])
+        otp=ot/th*100 if th>0 else 0
+        st.markdown(f"""<div class="kpi-row">
+          <div class="kpi-pill"><div class="kpi-val">{th:,.0f}</div><div class="kpi-lbl">Total Hours</div></div>
+          <div class="kpi-pill"><div class="kpi-val r">{ot:,.1f}</div><div class="kpi-lbl">OT Hrs ({otp:.1f}%)</div></div>
+          <div class="kpi-pill"><div class="kpi-val b">${rp+op:,.0f}</div><div class="kpi-lbl">Labor Cost</div></div>
+          <div class="kpi-pill"><div class="kpi-val r">${op:,.0f}</div><div class="kpi-lbl">OT Pay</div></div>
+          <div class="kpi-pill"><div class="kpi-val g">{ue}</div><div class="kpi-lbl">Employees</div></div>
         </div>""", unsafe_allow_html=True)
 
-    # AI response
-    st.markdown('<div class="ai-model-tag">✦ Llama 3.3 · 70B</div>', unsafe_allow_html=True)
-    if summary.strip():
-        st.markdown(f'<div class="ai-response-card">{summary}</div>', unsafe_allow_html=True)
+    # AI response card
+    st.markdown(f"""
+    <div class="ai-card">
+      <div class="ai-card-header">
+        <div class="ai-model-pill">✦ Llama 3.3 · 70B</div>
+      </div>
+      <div class="ai-response">{summary}</div>
+    </div>""", unsafe_allow_html=True)
 
-    # Schedule table
+    # ── Schedule table ──
     if sched_df is not None:
-        st.markdown('<div class="ai-tbl-hdr">📅 Generated Schedule</div><div class="ai-divider"></div>',
-                    unsafe_allow_html=True)
-        SHIFT_COLORS = {
-            "AM":  "background-color:#dbeafe;color:#1e40af;font-weight:600",
-            "PM":  "background-color:#dcfce7;color:#166534;font-weight:600",
-            "MID": "background-color:#fef9c3;color:#854d0e;font-weight:600",
-            "OFF": "background-color:#f3f4f6;color:#6b7280",
-            "RDO": "background-color:#fee2e2;color:#991b1b;font-weight:600",
-            "NT":  "background-color:#ede9fe;color:#5b21b6;font-weight:600",
+        st.markdown('<div class="sec-hdr">Generated Schedule</div>', unsafe_allow_html=True)
+        # Legend
+        st.markdown("""<div class="sched-legend">
+          <span class="sched-chip" style="background:#dbeafe;color:#1e40af">🌅 AM — Morning</span>
+          <span class="sched-chip" style="background:#dcfce7;color:#15803d">🌆 PM — Afternoon</span>
+          <span class="sched-chip" style="background:#fef9c3;color:#92400e">🕛 MID — Mid-shift</span>
+          <span class="sched-chip" style="background:#ede9fe;color:#5b21b6">🌙 NT — Night</span>
+          <span class="sched-chip" style="background:#f3f4f6;color:#6b7280">☐ OFF</span>
+          <span class="sched-chip" style="background:#fee2e2;color:#991b1b">RDO</span>
+        </div>""", unsafe_allow_html=True)
+
+        SHIFT_CLR={
+            "AM":"background-color:#dbeafe;color:#1e40af;font-weight:600",
+            "PM":"background-color:#dcfce7;color:#15803d;font-weight:600",
+            "MID":"background-color:#fef9c3;color:#92400e;font-weight:600",
+            "OFF":"background-color:#f3f4f6;color:#9ca3af",
+            "RDO":"background-color:#fee2e2;color:#991b1b;font-weight:600",
+            "NT":"background-color:#ede9fe;color:#5b21b6;font-weight:600",
         }
-        fixed_cols = {"Employee Name","Department","Role","Name"}
-        shift_cols = [c for c in sched_df.columns if c not in fixed_cols]
+        fixed={"Employee Name","Department","Role","Name"}
+        shift_cols=[c for c in sched_df.columns if c not in fixed]
+        styled=sched_df.style.applymap(lambda v:SHIFT_CLR.get(str(v).strip().upper(),""),subset=shift_cols) if shift_cols else sched_df.style
+        st.dataframe(styled,use_container_width=True,height=min(56+36*len(sched_df),620))
+        st.download_button("⬇ Download Schedule (.csv)",
+            data=sched_df.to_csv(index=False).encode(),
+            file_name=f"schedule_{s_date}_{e_date}.csv",mime="text/csv",key="dl_sched")
 
-        def style_cell(val):
-            return SHIFT_COLORS.get(str(val).strip().upper(), "")
+    # ── Charts ──
+    if has_act and "schedule" not in intents:
+        st.markdown('<div class="sec-hdr">Supporting Charts</div>', unsafe_allow_html=True)
+        render_charts(data,intents)
 
-        styled = sched_df.style.applymap(style_cell, subset=shift_cols) if shift_cols else sched_df.style
-        st.dataframe(styled, use_container_width=True, height=min(50 + 36*len(sched_df), 600))
-
-        csv_bytes = sched_df.to_csv(index=False).encode()
-        st.download_button("⬇ Download Schedule (.csv)", data=csv_bytes,
-                           file_name=f"schedule_{start_date}_{end_date}.csv",
-                           mime="text/csv", key="dl_sched")
-
-    # Employee roster expander (schedule requests)
-    if "schedule_mockup" in intents:
+    # ── Roster expander for schedule requests ──
+    if "schedule" in intents:
         try:
-            emps_now = fetch_employees(hotel)
+            emps_now=employees(hotel)
             if not emps_now.empty:
                 with st.expander("Employee Roster Used", expanded=False):
-                    st.dataframe(emps_now, use_container_width=True)
-        except Exception:
-            pass
+                    st.dataframe(emps_now,use_container_width=True)
+        except: pass
 
-    # Charts (non-schedule)
-    if has_act and "schedule_mockup" not in intents:
-        st.markdown('<div class="ai-chart-hdr">Supporting Charts</div><div class="ai-divider"></div>',
-                    unsafe_allow_html=True)
-        render_charts(data, intents)
-
-    # ── Email ──
-    st.markdown('<div class="ai-email-box">', unsafe_allow_html=True)
-    st.markdown("**📧 Email This Report**")
-    email_input = st.text_input(
-        "Recipient(s) — separate with commas",
-        placeholder="you@example.com, manager@hotel.com",
-        key="ai_email_to",
-    )
-    if st.button("Send Report via Email", key="ai_send_email"):
-        if not email_input.strip():
+    # ── EMAIL ──
+    st.markdown('<div class="email-box"><div class="email-title">📧 Email This Report</div>',
+                unsafe_allow_html=True)
+    ec1,ec2=st.columns([4,1])
+    with ec1:
+        email_to=st.text_input("Recipients (comma-separated)",
+            placeholder="you@example.com, manager@hotel.com",
+            label_visibility="visible", key="ai_email_to")
+    with ec2:
+        st.markdown("<div style='height:28px'></div>",unsafe_allow_html=True)
+        send_btn=st.button("Send", key="ai_send_email", type="primary", use_container_width=True)
+    if send_btn:
+        if not email_to.strip():
             st.warning("Enter at least one email address.")
         else:
-            recips = [e.strip() for e in email_input.split(",") if e.strip()]
+            recips=[e.strip() for e in email_to.split(",") if e.strip()]
             with st.spinner("Sending…"):
                 try:
-                    _send_report(recips, hotel, st.session_state.ai_q, summary, period, data, sched_df)
-                    st.success(f"✅ Report sent to: {', '.join(recips)}")
+                    do_email(recips,hotel,st.session_state.ai_q,summary,period,data,sched_df)
+                    st.success(f"✅ Sent to: {', '.join(recips)}")
                 except Exception as e:
-                    st.error(f"Email failed: {e}")
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-# ─────────────────────────── Email builder ────────────────────────────────────
-def _send_report(recips, hotel, question, summary, period, data, sched_df: Optional[pd.DataFrame]):
-    tot = data.get("totals", pd.DataFrame())
-    bd  = data.get("by_dept", pd.DataFrame())
-    te  = data.get("top_emp", pd.DataFrame())
-    r   = tot.iloc[0] if not tot.empty else {}
-    th  = float(r.get("total_hours", 0)); ot = float(r.get("total_ot", 0))
-    rp  = float(r.get("reg_pay", 0));    op  = float(r.get("ot_pay", 0))
-
-    lines = [
-        f"AIPilot Labor Report — {hotel}",
-        f"Period: {period}",
-        "=" * 60, "",
-        f"QUESTION: {question}", "",
-        "AI SUMMARY:", summary, "",
-    ]
-    if sched_df is not None:
-        lines += ["SCHEDULE MOCKUP:", sched_df.to_string(index=False), ""]
-    if th > 0:
-        lines += ["KEY METRICS:",
-                  f"  Total Hours : {th:,.1f}",
-                  f"  OT Hours    : {ot:,.1f}",
-                  f"  Total Cost  : ${rp+op:,.2f}",
-                  f"  OT Pay      : ${op:,.2f}", ""]
-    if not bd.empty:
-        lines += ["DEPT BREAKDOWN:", bd.to_string(index=False), ""]
-    if not te.empty:
-        lines += ["TOP EMPLOYEES (OT):", te.head(10).to_string(index=False), ""]
-    lines.append(f"— LaborPilot AIPilot · {date.today().strftime('%B %d, %Y')}")
-
-    send_email(recips, f"AIPilot Report — {hotel} | {period}", "\n".join(lines))
+                    st.error(f"Failed: {e}")
+    st.markdown("</div>",unsafe_allow_html=True)

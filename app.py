@@ -4384,6 +4384,10 @@ elif main_choice == "Scheduling":
     </style>
     """, unsafe_allow_html=True)
 
+    # ---------- role guard ----------------------------------------------------
+    _sch_role = (st.session_state.user.get("role") or "").strip().lower()
+    _is_employee = _sch_role == "employee"
+
     # ---------- 1) week reference ------------------------------------------
     if "sch_week_start" not in st.session_state:
         st.session_state.sch_week_start = date.today() + relativedelta(weekday=MO(-1))
@@ -4547,21 +4551,22 @@ elif main_choice == "Scheduling":
 
     shift_opts = shift_strings[:]
 
-    with st.expander("➕ Add new shift", expanded=False):
-        period = st.selectbox("Time of day", ["Morning", "Afternoon", "Evening"])
-        c1, c2 = st.columns(2)
-        with c1: t_start = st.time_input("Start", value=time(0,0), step=1800)
-        with c2: t_end   = st.time_input("End",   value=time(12,0), step=1800)
-        if st.button("💾 Save Shift"):
-            if t_end <= t_start:
-                st.error("End time must be after start.")
-            else:
-                new_shift = f"{t_start.strftime('%H:%M')}-{t_end.strftime('%H:%M')}"
-                if new_shift in shift_opts:
-                    st.warning("That shift already exists.")
+    if not _is_employee:
+        with st.expander("➕ Add new shift", expanded=False):
+            period = st.selectbox("Time of day", ["Morning", "Afternoon", "Evening"])
+            c1, c2 = st.columns(2)
+            with c1: t_start = st.time_input("Start", value=time(0,0), step=1800)
+            with c2: t_end   = st.time_input("End",   value=time(12,0), step=1800)
+            if st.button("💾 Save Shift"):
+                if t_end <= t_start:
+                    st.error("End time must be after start.")
                 else:
-                    session.add(ShiftTbl(position_id=pos_rec.id, period=period, start=t_start, end=t_end))
-                    session.commit(); st.success("Shift saved."); do_rerun()
+                    new_shift = f"{t_start.strftime('%H:%M')}-{t_end.strftime('%H:%M')}"
+                    if new_shift in shift_opts:
+                        st.warning("That shift already exists.")
+                    else:
+                        session.add(ShiftTbl(position_id=pos_rec.id, period=period, start=t_start, end=t_end))
+                        session.commit(); st.success("Shift saved."); do_rerun()
 
     # ---------- 6) editable grid -------------------------------------------
     df_view = sched_df.copy()
@@ -4638,8 +4643,9 @@ elif main_choice == "Scheduling":
     """)
 
     gb = GridOptionsBuilder.from_dataframe(df_view)
-    gb.configure_default_column(editable=True)
-    gb.configure_default_column(editable=True, singleClickEdit=True)
+    _grid_editable = not _is_employee
+    gb.configure_default_column(editable=_grid_editable)
+    gb.configure_default_column(editable=_grid_editable, singleClickEdit=_grid_editable)
 
     for col in ["ID", "First Name", "Last Name", "emp_id"]:
         gb.configure_column(col, editable=False, hide=True if col=="emp_id" else False)
@@ -4663,14 +4669,23 @@ elif main_choice == "Scheduling":
     """)
 
     for col in day_cols:
-        gb.configure_column(
-            col,
-            cellEditor="agSelectCellEditor",
-            cellEditorParams={"values": shift_opts + ["OFF", ""]},
-            cellStyle=js_style,
-            valueFormatter=fmt12_js,
-            flex=1
-        )
+        if _is_employee:
+            gb.configure_column(
+                col,
+                editable=False,
+                cellStyle=js_style,
+                valueFormatter=fmt12_js,
+                flex=1
+            )
+        else:
+            gb.configure_column(
+                col,
+                cellEditor="agSelectCellEditor",
+                cellEditorParams={"values": shift_opts + ["OFF", ""]},
+                cellStyle=js_style,
+                valueFormatter=fmt12_js,
+                flex=1
+            )
 
     gb.configure_column(
         "Total",
@@ -4702,10 +4717,13 @@ elif main_choice == "Scheduling":
         st.session_state.sch_week_start += timedelta(days=7); do_rerun()
     nav_range2.markdown(f"### {week_start:%d %b %Y} – {week_end:%d %b %Y}")
 
-    hdr_l, hdr_u, hdr_s, hdr_c = st.columns([6,1,1,2])
-    with hdr_u: undo_clicked  = st.button("🔄 Undo")
-    with hdr_s: save_clicked  = st.button("💾 Save")
-    with hdr_c: copy_clicked  = st.button("📋 Copy Forward")
+    if _is_employee:
+        undo_clicked = save_clicked = copy_clicked = False
+    else:
+        hdr_l, hdr_u, hdr_s, hdr_c = st.columns([6,1,1,2])
+        with hdr_u: undo_clicked  = st.button("🔄 Undo")
+        with hdr_s: save_clicked  = st.button("💾 Save")
+        with hdr_c: copy_clicked  = st.button("📋 Copy Forward")
 
     # ---------- grid CSS ----------------------------------------------------
     st.markdown("""

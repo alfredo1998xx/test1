@@ -277,7 +277,7 @@ st.set_page_config(page_title="Hotel Labor Tool", layout="wide", initial_sidebar
 def apply_manager_scope(df):
     user = st.session_state.user
 
-    if user["role"].strip().lower() in ("admin", "super user", "night audit"):
+    if user["role"].strip().lower() in ("admin", "super user", "night audit", "asset manager"):
         return df
 
     scopes = user.get("scope", [])

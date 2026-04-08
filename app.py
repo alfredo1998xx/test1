@@ -447,11 +447,10 @@ section[data-testid="stMain"] .stDateInput input {
 
 # --- handle logout via query param ---
 if st.query_params.get("logout") == "1":
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    # Reset menu widget to default so a new user doesn't inherit the previous page
-    st.session_state["main_menu"] = "Dashboard"
-    st.session_state["acl_loaded"] = False
+    _next_count = st.session_state.get("_logout_count", 0) + 1
+    st.session_state.clear()
+    # Increment logout counter so login form gets a fresh key each time
+    st.session_state["_logout_count"] = _next_count
     st.query_params.clear()
     st.rerun()
 
@@ -803,7 +802,8 @@ if "token" not in st.session_state:
 
         st.title("Hotel Login")
 
-        with st.form("login_form"):
+        _form_ver = st.session_state.get("_logout_count", 0)
+        with st.form(f"login_form_{_form_ver}"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
             submit = st.form_submit_button("Login", type="primary")

@@ -1284,19 +1284,22 @@ if _os.path.exists(_logo_path):
         _logo_b64 = _b64.b64encode(_f.read()).decode()
     st.sidebar.markdown(f"""
         <style>
+        .block-container {
+            padding-top: 0.5rem;
+        }
         .lp-sidebar-logo {{
             position : fixed;
-            bottom   : 12px;
+            bottom   : 8px;
             left     : 0;
             width    : 220px;
             display  : flex;
             justify-content: center;
-            padding  : 0 4px;
+            padding  : 0 2px;
             box-sizing: border-box;
             z-index  : 9999;
         }}
         .lp-sidebar-logo img {{
-            width    : 212px;
+            width    : 218px;
             max-width: 100%;
             height   : auto;
         }}

@@ -798,6 +798,17 @@ if "token" not in st.session_state:
 
     with col2:
 
+        st.markdown("""
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:5px;">
+                <div style="width:22px; height:22px; background:#3a3a3a; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
+                <div style="width:22px; height:22px; background:#e02020; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
+                <div style="width:22px; height:22px; background:#3a3a3a; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
+                <div style="width:22px; height:22px; background:#3a3a3a; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
+            </div>
+            <div style="font-size:26px; font-weight:800; color:#111; line-height:1.15; letter-spacing:-0.5px;">Labor<br>Pilot</div>
+        </div>
+        """, unsafe_allow_html=True)
         st.title("Hotel Login")
 
         _form_ver = st.session_state.get("_logout_count", 0)

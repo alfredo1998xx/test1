@@ -794,19 +794,27 @@ if st.query_params.get("reset_request") == "true":
 # ─────────────────────────────────────────
 if "token" not in st.session_state:
 
-    col1, col2, col3 = st.columns([1, 2, 1])  # Center the login form
+    col1, col2, col3 = st.columns([1.1, 2, 1.1])  # Center the login form
 
     with col2:
 
         st.markdown("""
+        <style>
+        div[data-testid="column"]:has(div.block-container) {
+            padding-top: 0 !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        st.markdown("""
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:5px;">
-                <div style="width:22px; height:22px; background:#3a3a3a; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
-                <div style="width:22px; height:22px; background:#e02020; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
-                <div style="width:22px; height:22px; background:#3a3a3a; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
-                <div style="width:22px; height:22px; background:#3a3a3a; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
+                <div style="width:26px; height:26px; background:#3a3a3a; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
+                <div style="width:26px; height:26px; background:#e02020; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
+                <div style="width:26px; height:26px; background:#3a3a3a; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
+                <div style="width:26px; height:26px; background:#3a3a3a; border-radius:6px; box-shadow:2px 2px 4px rgba(0,0,0,0.2);"></div>
             </div>
-            <div style="font-size:22px; font-weight:800; color:#111; line-height:1.15; letter-spacing:-0.5px;">Labor<br>Pilot</div>
+            <div style="font-size:24px; font-weight:800; color:#111; line-height:1.15; letter-spacing:-0.5px;">Labor<br>Pilot</div>
         </div>
         """, unsafe_allow_html=True)
         _form_ver = st.session_state.get("_logout_count", 0)

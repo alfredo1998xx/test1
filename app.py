@@ -1286,7 +1286,7 @@ if _os.path.exists(_logo_path):
             z-index  : 9999;
         }}
         .lp-sidebar-logo img {{
-            width    : 130px;
+            width    : 165px;
             max-width: 100%;
             height   : auto;
         }}

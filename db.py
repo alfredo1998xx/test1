@@ -216,7 +216,7 @@ class OTBHours(Base, HotelScoped):
 class Actual(Base, HotelScoped):
     __tablename__ = "actual"
     id = Column(Integer, primary_key=True)
-    emp_id = Column(Integer, ForeignKey("employee.id"))
+    emp_id = Column(Integer, nullable=True)
     position_id = Column(Integer, ForeignKey("positions.id"))
     date = Column(Date, nullable=False)
     hours = Column(Float, default=0.0)

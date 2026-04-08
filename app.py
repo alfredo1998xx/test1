@@ -1292,9 +1292,9 @@ if _os.path.exists(_logo_path):
         _logo_b64 = _b64.b64encode(_f.read()).decode()
     st.sidebar.markdown(f"""
         <style>
-        .block-container {
+        .block-container {{
             padding-top: 0.5rem;
-        }
+        }}
         .lp-sidebar-logo {{
             position : fixed;
             bottom   : 8px;

@@ -52,30 +52,53 @@ SUGGESTIONS = [
 # INTENT DETECTION
 # ─────────────────────────────────────────────────────────────────────────────
 INTENT_MAP = {
-    "ot":         ["overtime", "ot hours", "ot pay", "over time", "time and a half"],
-    "risk":       ["risk", "at risk", "approaching 40", "close to 40", "near 40", "threshold"],
+    "ot":         ["overtime", "ot hours", "ot pay", "over time", "time and a half",
+                   "time-and-a-half", "ot rate", "ot cost"],
+    "risk":       ["risk", "at risk", "approaching 40", "close to 40", "near 40",
+                   "threshold", "about to hit", "almost 40", "ot risk"],
     "schedule":   ["schedule", "scheduling", "mockup", "mock-up", "who is working",
-                   "who's working", "shift", "shifts", "staffing", "coverage"],
-    "cost":       ["cost", "payroll", "spend", "spending", "budget", "wage", "salary",
-                   "expense", "pay"],
+                   "who's working", "shift", "shifts", "staffing", "coverage",
+                   "create a schedule", "build a schedule", "suggest a schedule",
+                   "next week schedule", "this week schedule"],
+    "cost":       ["cost", "payroll", "spend", "spending", "budget", "wage", "wages",
+                   "salary", "expense", "pay", "total cost", "labor cost", "labor spend"],
     "comparison": ["compare", "comparison", "vs ", "versus", "week over week",
-                   "last week vs", "previous", "how does"],
-    "position":   ["position", "role", "job title", "which position", "by position"],
+                   "last week vs", "previous", "how does", "better or worse",
+                   "more than", "less than", "higher", "lower", "trend",
+                   "change", "increased", "decreased"],
+    "position":   ["position", "role", "job title", "which position", "by position",
+                   "by role", "job type"],
     "efficiency": ["per room", "per occupied", "efficiency", "labor ratio", "cpor",
-                   "cost per room"],
-    "employee":   ["employee", "staff", "worker", "who worked", "who has the most",
-                   "top earner", "earner"],
-    "headcount":  ["headcount", "how many employees", "how many people", "staffing level"],
+                   "cost per room", "revenue per", "productivity"],
+    "employee":   ["employee", "employees", "staff", "worker", "who worked",
+                   "who has the most", "top earner", "earner", "individual",
+                   "person", "who logged", "who put in"],
+    "headcount":  ["headcount", "how many employees", "how many people",
+                   "staffing level", "head count", "number of employees",
+                   "team size", "how many staff"],
     "department": ["department", "dept", "housekeeping", "front desk", "food",
-                   "maintenance", "engineering", "by department"],
+                   "maintenance", "engineering", "by department", "which dept",
+                   "food and beverage", "f&b", "front office"],
 }
 
-def detect_intent(question: str) -> str:
+def detect_intents(question: str) -> set:
+    """Return ALL matching intents for the question (multi-intent support)."""
     q = question.lower()
+    found = set()
     for intent, keywords in INTENT_MAP.items():
         if any(kw in q for kw in keywords):
-            return intent
-    return "general"
+            found.add(intent)
+    return found if found else {"general"}
+
+def detect_intent(question: str) -> str:
+    """Return primary intent (kept for backwards compatibility)."""
+    intents = detect_intents(question)
+    priority = ["risk", "schedule", "comparison", "ot", "efficiency",
+                "employee", "cost", "position", "department", "headcount"]
+    for p in priority:
+        if p in intents:
+            return p
+    return next(iter(intents))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,7 +150,20 @@ def _q(sql: str, params: dict) -> pd.DataFrame:
         return pd.read_sql_query(text(sql), conn, params=params)
 
 
-def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
+def fetch_data(hotel: str, start: date, end: date, intent) -> dict:
+    """
+    intent can be a str or a set of strings (multi-intent).
+    "general" triggers fetching of ALL data types.
+    """
+    if isinstance(intent, str):
+        intents = {intent}
+    else:
+        intents = set(intent)
+
+    # "general" means we know nothing — fetch everything
+    if "general" in intents:
+        intents = set(INTENT_MAP.keys()) | {"general"}
+
     p  = {"hotel": hotel, "start": str(start), "end": str(end)}
     today = date.today()
     data = {}
@@ -159,7 +195,7 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
     """, p)
 
     # ── OT / Employee detail ──
-    if intent in ("ot", "employee", "general", "headcount", "comparison"):
+    if intents & {"ot", "employee", "general", "headcount", "comparison", "cost"}:
         data["emp_ot"] = _q("""
             SELECT e.name, e.department,
                    COALESCE(SUM(a.hours),0)    total_hours,
@@ -174,7 +210,7 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
         """, p)
 
     # ── Position breakdown ──
-    if intent in ("position", "general", "cost", "department"):
+    if intents & {"position", "general", "cost", "department", "employee"}:
         data["position"] = _q("""
             SELECT pos.name position, d.name department,
                    COALESCE(SUM(a.hours),0)    total_hours,
@@ -189,7 +225,7 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
         """, p)
 
     # ── Daily trend ──
-    if intent in ("ot", "cost", "general", "comparison", "department"):
+    if intents & {"ot", "cost", "general", "comparison", "department", "employee"}:
         data["daily"] = _q("""
             SELECT a.date,
                    COALESCE(SUM(a.hours),0)    hours,
@@ -202,7 +238,7 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
         """, p)
 
     # ── Comparison: fetch previous period too ──
-    if intent == "comparison":
+    if "comparison" in intents:
         period_days = (end - start).days + 1
         prev_end   = start - timedelta(days=1)
         prev_start = prev_end - timedelta(days=period_days - 1)
@@ -227,7 +263,7 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
         data["prev_period"] = (prev_start, prev_end)
 
     # ── OT Risk: this week's schedule + actual so far ──
-    if intent == "risk":
+    if "risk" in intents:
         week_start = today - timedelta(days=today.weekday())
         week_end   = week_start + timedelta(days=6)
         rp = {"hotel": hotel, "ws": str(week_start),
@@ -252,7 +288,7 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
         data["risk_week"] = (week_start, week_end)
 
     # ── Schedule: shifts in range ──
-    if intent in ("schedule", "risk", "headcount"):
+    if intents & {"schedule", "risk", "headcount", "general"}:
         data["schedule"] = _q("""
             SELECT e.name employee, e.department, e.role position,
                    s.day, s.shift_type
@@ -271,7 +307,7 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
         """, p)
 
     # ── Efficiency: labor cost per occupied room ──
-    if intent == "efficiency":
+    if "efficiency" in intents:
         data["rooms"] = _q("""
             SELECT ra.date, COALESCE(SUM(ra.value),0) occupied_rooms
             FROM room_actual ra
@@ -281,7 +317,7 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
         """, p)
 
     # ── Schedule mockup: full employee roster ──
-    if intent == "schedule":
+    if "schedule" in intents or "general" in intents:
         data["roster"] = _q("""
             SELECT e.name, e.department, e.role position, e.emp_type
             FROM employee e WHERE e.hotel_name=:hotel
@@ -295,114 +331,152 @@ def fetch_data(hotel: str, start: date, end: date, intent: str) -> dict:
 # PROMPT BUILDER — question-focused
 # ─────────────────────────────────────────────────────────────────────────────
 def build_prompt(hotel: str, start: date, end: date,
-                 question: str, intent: str, data: dict) -> str:
-    today      = date.today()
-    period     = f"{start.strftime('%B %d')} — {end.strftime('%B %d, %Y')}"
-    days       = (end - start).days + 1
+                 question: str, intent, data: dict) -> str:
+    """
+    Build the user-facing data context prompt.
+    The system persona is in SYSTEM_PROMPT (sent as role=system in call_groq).
+    intent can be a str or set of strings.
+    """
+    today  = date.today()
+    period = f"{start.strftime('%B %d')} — {end.strftime('%B %d, %Y')}"
+    days   = (end - start).days + 1
 
-    t  = data["totals"].iloc[0] if not data["totals"].empty else {}
+    if isinstance(intent, str):
+        intents = {intent}
+    else:
+        intents = set(intent)
+
+    # ── Core metrics ──
+    t   = data["totals"].iloc[0] if not data["totals"].empty else {}
     th  = float(t.get("total_hours", 0))
     tot = float(t.get("total_ot", 0))
     rp  = float(t.get("reg_pay", 0))
     op  = float(t.get("ot_pay", 0))
     tc  = rp + op
     emp = int(t.get("employees", 0))
-    ot_pct = (tot / th * 100) if th else 0
-
-    dept_txt = data["dept"].to_string(index=False) if not data["dept"].empty else "No department data."
+    ot_pct   = (tot / th * 100) if th else 0
+    reg_pct  = 100 - ot_pct
 
     lines = [
-        "You are an elite hotel labor analytics advisor. Your sole job right now is to directly answer:",
-        f'"{question}"',
+        f"QUESTION: {question}",
         "",
-        f"HOTEL: {hotel}   PERIOD: {period} ({days} days)   TODAY: {today.strftime('%A, %B %d, %Y')}",
+        f"HOTEL: {hotel}",
+        f"ANALYSIS PERIOD: {period} ({days} days)",
+        f"TODAY: {today.strftime('%A, %B %d, %Y')}",
         "",
-        "=== OVERALL METRICS ===",
-        f"Total Hours: {th:,.1f}h  |  OT Hours: {tot:,.1f}h ({ot_pct:.1f}%)  |  "
-        f"Employees: {emp}  |  Total Labor Cost: ${tc:,.2f}  |  OT Pay: ${op:,.2f}",
+        "─── OVERALL LABOR METRICS ───",
+        f"Total Hours Worked : {th:,.1f}h  (Regular: {th - tot:,.1f}h  |  OT: {tot:,.1f}h = {ot_pct:.1f}% of total)",
+        f"Total Labor Cost   : ${tc:,.2f}  (Regular Pay: ${rp:,.2f}  |  OT Pay: ${op:,.2f})",
+        f"Avg Cost/Hour      : ${(tc / th):,.2f}" if th else "Avg Cost/Hour: N/A",
+        f"Active Employees   : {emp}",
         "",
-        "=== DEPARTMENT BREAKDOWN ===",
-        dept_txt,
     ]
 
-    # Intent-specific sections
-    if intent == "ot" and "emp_ot" in data and not data["emp_ot"].empty:
-        top_ot = data["emp_ot"].nlargest(10, "ot_hours")
-        lines += ["", "=== EMPLOYEE OT DETAIL (top 10 by OT) ===", top_ot.to_string(index=False)]
+    # ── Department breakdown — always included ──
+    if not data["dept"].empty:
+        dept = data["dept"].copy()
+        # Add total_cost column if not present
+        if "total_cost" not in dept.columns:
+            dept["total_cost"] = dept.get("reg_pay", 0) + dept.get("ot_pay", 0)
+        lines += ["─── DEPARTMENT BREAKDOWN ───", dept.to_string(index=False), ""]
 
-    if intent == "employee" and "emp_ot" in data and not data["emp_ot"].empty:
-        lines += ["", "=== ALL EMPLOYEES (by hours worked) ===",
-                  data["emp_ot"].to_string(index=False)]
+    # ── Employee / OT detail ──
+    if "emp_ot" in data and not data["emp_ot"].empty:
+        emp_df = data["emp_ot"]
+        if "ot" in intents or "comparison" in intents:
+            top_ot = emp_df.nlargest(15, "ot_hours")
+            lines += ["─── TOP EMPLOYEES BY OT HOURS ───", top_ot.to_string(index=False), ""]
+        if "employee" in intents:
+            lines += ["─── ALL EMPLOYEES BY HOURS ───", emp_df.to_string(index=False), ""]
+        if "headcount" in intents or "general" in intents:
+            lines += [
+                f"─── EMPLOYEE COUNT SUMMARY ───",
+                f"Employees with OT: {(emp_df['ot_hours'] > 0).sum()}",
+                f"Employees at/over 40h: {(emp_df['total_hours'] >= 40).sum()}",
+                "",
+            ]
 
-    if intent == "position" and "position" in data and not data["position"].empty:
-        lines += ["", "=== POSITION BREAKDOWN ===", data["position"].to_string(index=False)]
+    # ── Position breakdown ──
+    if "position" in data and not data["position"].empty:
+        lines += ["─── BY POSITION/ROLE ───", data["position"].to_string(index=False), ""]
 
-    if intent == "risk" and "ot_risk" in data and not data["ot_risk"].empty:
+    # ── Daily trend ──
+    if "daily" in data and not data["daily"].empty:
+        daily = data["daily"].copy()
+        if "reg_pay" in daily.columns and "ot_pay" in daily.columns:
+            daily["total_cost"] = daily["reg_pay"] + daily["ot_pay"]
+        lines += ["─── DAILY TREND ───", daily.to_string(index=False), ""]
+
+    # ── OT Risk ──
+    if "ot_risk" in data and not data["ot_risk"].empty:
         ws, we = data.get("risk_week", (today, today))
         risk_df = data["ot_risk"]
         at_risk = risk_df[risk_df["projected_hours"] >= 36]
+        near_40 = risk_df[risk_df["projected_hours"] == 40]
         lines += [
-            "",
-            f"=== OT RISK THIS WEEK ({ws.strftime('%b %d')} – {we.strftime('%b %d')}) ===",
-            "NOTE: projected_hours = scheduled_days × 8h",
+            f"─── OT RISK ANALYSIS ({ws.strftime('%b %d')} – {we.strftime('%b %d')}) ───",
+            "NOTE: projected_hours = scheduled_days × 8h  |  OT threshold = 40h/week (FLSA)",
             risk_df.to_string(index=False),
             "",
-            f"EMPLOYEES AT OR NEAR OT THRESHOLD (≥36h projected):",
-            at_risk.to_string(index=False) if not at_risk.empty else "None currently flagged.",
+            f"AT/NEAR OT THRESHOLD (≥36h projected):",
+            at_risk.to_string(index=False) if not at_risk.empty else "  None currently flagged.",
+            "",
+            f"WILL HIT EXACTLY 40h (full 5-day schedule):",
+            near_40.to_string(index=False) if not near_40.empty else "  None.",
+            "",
         ]
 
-    if intent == "schedule":
-        if "schedule" in data and not data["schedule"].empty:
-            lines += ["", "=== CURRENT SCHEDULE DATA ===", data["schedule"].to_string(index=False)]
-        if "roster" in data and not data["roster"].empty:
-            lines += ["", "=== EMPLOYEE ROSTER (use to build mockup) ===",
-                      data["roster"].to_string(index=False)]
-
-    if intent == "comparison":
-        pt = data.get("prev_totals")
-        pp = data.get("prev_period")
-        if pt is not None and not pt.empty and pp:
-            prev = pt.iloc[0]
-            lines += [
-                "",
-                f"=== PREVIOUS PERIOD ({pp[0].strftime('%b %d')} – {pp[1].strftime('%b %d')}) ===",
-                f"Hours: {float(prev.get('total_hours',0)):,.1f}h  |  "
-                f"OT: {float(prev.get('total_ot',0)):,.1f}h  |  "
-                f"Cost: ${float(prev.get('total_cost',0)):,.2f}",
-            ]
-            if "prev_dept" in data and not data["prev_dept"].empty:
-                lines += ["By dept:", data["prev_dept"].to_string(index=False)]
-
-    if intent == "efficiency" and "rooms" in data and not data["rooms"].empty:
-        rooms_df = data["rooms"]
-        total_rooms = rooms_df["occupied_rooms"].sum()
-        cpor = tc / total_rooms if total_rooms else 0
+    # ── Schedule / Roster ──
+    if "schedule" in data and not data["schedule"].empty:
+        lines += ["─── EXISTING SCHEDULE DATA ───", data["schedule"].to_string(index=False), ""]
+    if "headcount_daily" in data and not data["headcount_daily"].empty:
+        lines += ["─── DAILY HEADCOUNT ───", data["headcount_daily"].to_string(index=False), ""]
+    if "roster" in data and not data["roster"].empty:
         lines += [
-            "", "=== ROOM OCCUPANCY DATA ===",
-            f"Total Occupied Room-Nights: {total_rooms:,.0f}",
-            f"Labor Cost Per Occupied Room (CPOR): ${cpor:,.2f}",
-            rooms_df.to_string(index=False),
+            "─── FULL EMPLOYEE ROSTER (use these real names for any schedule) ───",
+            data["roster"].to_string(index=False),
+            "",
         ]
 
-    if intent in ("cost", "general") and "daily" in data and not data["daily"].empty:
-        lines += ["", "=== DAILY TREND ===", data["daily"].to_string(index=False)]
+    # ── Comparison ──
+    if "prev_totals" in data and not data["prev_totals"].empty and "prev_period" in data:
+        pp   = data["prev_period"]
+        prev = data["prev_totals"].iloc[0]
+        ph   = float(prev.get("total_hours", 0))
+        pc   = float(prev.get("total_cost", 0))
+        pot  = float(prev.get("total_ot", 0))
+        h_chg = ((th - ph) / ph * 100) if ph else 0
+        c_chg = ((tc - pc) / pc * 100) if pc else 0
+        lines += [
+            f"─── COMPARISON: PREVIOUS PERIOD ({pp[0].strftime('%b %d')} – {pp[1].strftime('%b %d')}) ───",
+            f"Previous Hours : {ph:,.1f}h  →  Current: {th:,.1f}h  ({h_chg:+.1f}%)",
+            f"Previous Cost  : ${pc:,.2f}  →  Current: ${tc:,.2f}  ({c_chg:+.1f}%)",
+            f"Previous OT    : {pot:,.1f}h  →  Current: {tot:,.1f}h",
+            "",
+        ]
+        if "prev_dept" in data and not data["prev_dept"].empty:
+            lines += ["Previous Period by Department:", data["prev_dept"].to_string(index=False), ""]
 
-    lines += [
-        "",
-        "=== RESPONSE RULES ===",
-        "1. Answer the user's question DIRECTLY in your first sentence with the key number.",
-        "2. Write a concise executive narrative (3–5 sentences). CEO tone: confident, specific, no jargon.",
-        "3. Give exactly 3 'Key Takeaways' bullets — each with a real number and an actionable implication.",
-        "4. End with one 'Recommendation' — one decisive action for this week.",
-        "5. If the question asks to create or suggest a schedule — output a clean schedule table",
-        "   with columns: Department | Employee | Monday | Tuesday | Wednesday | Thursday | Friday | Saturday | Sunday.",
-        "   Use realistic 8-hour shift labels like '8am-4pm', '4pm-12am', 'OFF'.",
-        "6. For comparisons — show the before/after numbers and the percentage change.",
-        "7. For risk — name specific employees and their projected hours.",
-        "8. NEVER fabricate numbers. If data is absent, say so in one sentence.",
-        "9. Keep response under 450 words unless outputting a schedule table.",
-        "10. No markdown headers (##) — use natural spacing and the Key Takeaways / Recommendation labels.",
-    ]
+    # ── Efficiency / CPOR ──
+    if "rooms" in data and not data["rooms"].empty:
+        rooms_df    = data["rooms"]
+        total_rooms = rooms_df["occupied_rooms"].sum()
+        cpor        = tc / total_rooms if total_rooms else 0
+        lines += [
+            "─── ROOM OCCUPANCY & EFFICIENCY ───",
+            f"Total Occupied Room-Nights : {total_rooms:,.0f}",
+            f"Labor Cost Per Occupied Room (CPOR) : ${cpor:,.2f}",
+            f"Industry benchmark for full-service hotels: $18–$35 CPOR",
+            rooms_df.to_string(index=False),
+            "",
+        ]
+
+    # ── Data availability note ──
+    missing = []
+    if data["totals"].empty:  missing.append("labor actuals")
+    if data["dept"].empty:    missing.append("department data")
+    if missing:
+        lines += [f"NOTE: No {', '.join(missing)} found for the selected period/hotel.", ""]
 
     return "\n".join(lines)
 
@@ -414,7 +488,39 @@ class GroqRateLimitError(Exception):
     """Raised when Groq returns a 429 / token-limit error."""
 
 
-def call_groq(prompt: str) -> str:
+SYSTEM_PROMPT = """You are LaborPilot AI — a senior hotel labor analytics advisor with 20+ years of hospitality industry experience.
+
+Your expertise covers:
+- Hotel labor cost management, OT compliance, and scheduling optimization
+- Wage & hour law (FLSA overtime at 40h/week threshold)
+- Labor cost benchmarking across departments (Housekeeping, Front Desk, F&B, Maintenance, Engineering, Night Audit)
+- Cost Per Occupied Room (CPOR) and labor-to-revenue ratios
+- Schedule building, shift planning, and staffing coverage analysis
+- Payroll analysis, budget variance, and trend identification
+- Employee productivity and department efficiency metrics
+
+You have access to REAL data from the hotel's labor management system. Your responses must:
+1. Be grounded ENTIRELY in the data provided — never fabricate numbers
+2. Lead with the direct answer and key metric in the first sentence
+3. Use confident, executive-level language — no hedging, no jargon
+4. Give specific employee names, department names, and dollar amounts from the data
+5. Flag anomalies proactively (e.g., unusually high OT in one department, a spike in a day's cost)
+6. For schedule requests — output a complete, clean markdown table with real employee names from the roster
+7. For OT risk — list every at-risk employee by name with their exact projected hours
+8. For comparisons — always include the % change and direction (↑ increase / ↓ decrease)
+9. For cost questions — break down by department and identify the largest driver
+10. If asked something outside labor/hotel operations — briefly answer it, then pivot back to what you can help with in LaborPilot
+
+Formatting rules:
+- Use **bold** for key numbers and employee/department names
+- Use bullet lists for Key Takeaways (3 bullets, each with a real number)
+- End every response with a single "Recommendation:" line — one decisive action
+- Do NOT use markdown headers (##, ###)
+- Keep responses under 500 words unless generating a schedule table
+- For schedule tables use this format: | Employee | Department | Mon | Tue | Wed | Thu | Fri | Sat | Sun |"""
+
+
+def call_groq(user_prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str:
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
         raise ValueError("GROQ_API_KEY secret is not configured.")
@@ -423,15 +529,17 @@ def call_groq(prompt: str) -> str:
         model = st.session_state.get("aipilot_model", "llama-3.3-70b-versatile")
         resp = client.chat.completions.create(
             model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=900,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_prompt},
+            ],
+            temperature=0.25,
+            max_tokens=1400,
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
         msg = str(e)
         if "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower():
-            # Extract wait time if present
             wait = ""
             m = re.search(r'try again in ([^\.\'"]+)', msg, re.IGNORECASE)
             if m:
@@ -1556,12 +1664,13 @@ def render_aipilot(hotel: str):
         if not question.strip():
             st.warning("Please enter a question.")
         else:
-            intent     = detect_intent(question)
+            intents    = detect_intents(question)
+            intent     = detect_intent(question)   # primary intent for chart/display
             start_date, end_date = parse_date_range(question)
 
             with st.spinner("Fetching your data..."):
                 try:
-                    data = fetch_data(hotel, start_date, end_date, intent)
+                    data = fetch_data(hotel, start_date, end_date, intents)
                 except Exception as e:
                     st.error(f"Database error: {e}")
                     st.stop()
@@ -1578,7 +1687,7 @@ def render_aipilot(hotel: str):
             with st.spinner("Generating executive summary..."):
                 try:
                     prompt  = build_prompt(hotel, start_date, end_date,
-                                          question, intent, data)
+                                          question, intents, data)
                     summary = call_groq(prompt)
                 except GroqRateLimitError as e:
                     st.markdown(f"""
@@ -1609,6 +1718,7 @@ def render_aipilot(hotel: str):
                 "th": th, "tot": tot, "tc": tc,
                 "op": op, "emp": emp, "ot_pct": ot_pct,
                 "intent": intent,
+                "intents": intents,
                 "model": selected_model,
             }
 

@@ -949,6 +949,167 @@ def _make_chart_pngs(intent: str, data: dict) -> list:
     return charts
 
 
+def _md_table_to_email_html(table_lines: list) -> str:
+    """Convert a list of markdown table lines to a styled HTML table for email."""
+    # Filter out separator lines (--- rows)
+    data_lines = [l for l in table_lines
+                  if not re.match(r'^\s*\|[\s\-:|]+\|\s*$', l)]
+    if not data_lines:
+        return ""
+
+    rows = []
+    for line in data_lines:
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        rows.append(cells)
+
+    if not rows:
+        return ""
+
+    # First row = header
+    header_cells = rows[0]
+    thead = "".join(
+        f'<th style="padding:9px 14px;background:#6366f1;color:#ffffff;'
+        f'font-size:12px;font-weight:700;text-align:left;white-space:nowrap;">'
+        f'{c}</th>'
+        for c in header_cells
+    )
+
+    tbody = ""
+    for i, row in enumerate(rows[1:]):
+        bg = "#f5f3ff" if i % 2 == 0 else "#ffffff"
+        cells_html = "".join(
+            f'<td style="padding:8px 14px;border-bottom:1px solid #ede9fe;'
+            f'font-size:12px;color:#374151;white-space:nowrap;">{c}</td>'
+            for c in row
+        )
+        tbody += f'<tr style="background:{bg};">{cells_html}</tr>'
+
+    return (
+        f'<div style="overflow-x:auto;margin:12px 0;">'
+        f'<table style="border-collapse:collapse;min-width:100%;'
+        f'border-radius:8px;overflow:hidden;'
+        f'box-shadow:0 1px 8px rgba(99,102,241,.12);">'
+        f'<thead><tr>{thead}</tr></thead>'
+        f'<tbody>{tbody}</tbody>'
+        f'</table></div>'
+    )
+
+
+def _md_table_to_df(table_lines: list) -> pd.DataFrame:
+    """Convert markdown table lines to DataFrame (for Excel export)."""
+    data_lines = [l for l in table_lines
+                  if not re.match(r'^\s*\|[\s\-:|]+\|\s*$', l)]
+    if len(data_lines) < 2:
+        return pd.DataFrame()
+    headers = [c.strip() for c in data_lines[0].strip().strip("|").split("|")]
+    rows = []
+    for line in data_lines[1:]:
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells:
+            rows.append(cells)
+    if not rows:
+        return pd.DataFrame(columns=headers)
+    max_c = max(len(r) for r in rows)
+    headers = (headers + [""] * max_c)[:max_c]
+    return pd.DataFrame(rows, columns=headers)
+
+
+def _summary_to_email_html(summary: str) -> tuple:
+    """
+    Parse AI summary into email-safe HTML.
+    Returns (html_string, list_of_table_dataframes).
+    Converts markdown tables to proper styled HTML tables.
+    Escapes $ signs. Renders bullets and bold properly.
+    """
+    import html as _html
+
+    lines    = re.sub(r'\n{3,}', '\n\n', summary.strip()).splitlines()
+    html_out = []
+    dfs      = []  # extracted table DataFrames for Excel export
+    in_table = False
+    tbl_buf  = []
+    in_list  = False
+
+    def flush_table():
+        nonlocal in_table, tbl_buf
+        if tbl_buf:
+            html_out.append(_md_table_to_email_html(tbl_buf))
+            df = _md_table_to_df(tbl_buf)
+            if not df.empty:
+                dfs.append(df)
+        tbl_buf  = []
+        in_table = False
+
+    def flush_list():
+        nonlocal in_list
+        if in_list:
+            html_out.append('</ul>')
+            in_list = False
+
+    for line in lines:
+        is_table_row = bool(re.match(r'^\s*\|', line))
+
+        if is_table_row:
+            flush_list()
+            in_table = True
+            tbl_buf.append(line)
+            continue
+
+        if in_table:
+            flush_table()
+
+        # Escape HTML, then fix $ → &#36;
+        safe = _html.escape(line, quote=False).replace("$", "&#36;")
+        # Bold
+        safe = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', safe)
+
+        is_bullet = bool(re.match(r'^\s*([-*•]|\d+\.)\s+', line))
+
+        if is_bullet:
+            safe = re.sub(r'^\s*([-*•]|\d+\.)\s+', '', safe)
+            if not in_list:
+                html_out.append(
+                    '<ul style="margin:8px 0 10px 22px;padding:0;">'
+                )
+                in_list = True
+            html_out.append(
+                f'<li style="margin:5px 0;font-size:13px;line-height:1.75;'
+                f'color:#1f2937;">{safe}</li>'
+            )
+        else:
+            flush_list()
+            if not safe.strip():
+                html_out.append('<div style="height:6px;"></div>')
+            else:
+                html_out.append(
+                    f'<p style="margin:0 0 7px;font-size:13px;line-height:1.8;'
+                    f'color:#1f2937;">{safe}</p>'
+                )
+
+    flush_list()
+    if in_table:
+        flush_table()
+
+    return "\n".join(html_out), dfs
+
+
+def _make_excel_bytes(sheets: dict) -> bytes:
+    """Generate in-memory Excel workbook bytes from {sheet_name: DataFrame}."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for sheet_name, df in sheets.items():
+            safe_name = sheet_name[:31]  # Excel tab name max length
+            df.to_excel(writer, sheet_name=safe_name, index=False)
+            ws = writer.sheets[safe_name]
+            # Auto-fit columns
+            for col_cells in ws.columns:
+                max_len = max(
+                    (len(str(c.value)) for c in col_cells if c.value), default=8
+                )
+                ws.column_dimensions[col_cells[0].column_letter].width = min(max_len + 4, 40)
+    return buf.getvalue()
+
+
 def build_email_html(hotel: str, question: str,
                      start: date, end: date,
                      summary: str, data: dict,
@@ -995,13 +1156,8 @@ def build_email_html(hotel: str, question: str,
       </tr>
     </table>"""
 
-    # AI summary (preserve line breaks)
-    summary_lines = summary.strip().splitlines()
-    summary_html  = "".join(
-        f'<p style="margin:0 0 8px;font-size:14px;line-height:1.75;color:#1f2937;">{l}</p>'
-        if l.strip() else '<div style="height:6px;"></div>'
-        for l in summary_lines
-    )
+    # AI summary — parse prose + markdown tables into proper HTML
+    summary_html, _extracted_dfs = _summary_to_email_html(summary)
 
     # Data tables
     table_labels = [
@@ -1141,28 +1297,29 @@ def send_aipilot_email(recipients: list, hotel: str, question: str,
     """
     Build and send the AIPilot report email.
     Returns (success: bool, message: str).
+    MIME structure:
+      multipart/mixed
+        multipart/related
+          multipart/alternative  (plain text + HTML)
+          image/png × N          (inline CID charts)
+        application/xlsx         (Excel attachment, if tables exist)
     """
     try:
+        intent    = st.session_state.get("aipilot_last_result", {}).get("intent", "general")
         period    = f"{start.strftime('%b %d')} – {end.strftime('%b %d, %Y')}"
+        filename  = f"LaborPilot_{hotel.replace(' ','_')}_{start.strftime('%Y%m%d')}.xlsx"
         subject   = f"AIPilot Labor Insight — {hotel} — {period}"
 
-        chart_cids = _make_chart_pngs(
-            st.session_state.get("aipilot_last_intent", "general"), data
-        )
+        # ── Charts (inline PNG) ──
+        chart_cids = _make_chart_pngs(intent, data)
 
+        # ── HTML body ──
         html_body = build_email_html(
             hotel, question, start, end, summary, data,
             th, tot, tc, op, emp, ot_pct, chart_cids
         )
 
-        # Build MIME message
-        msg = MIMEMultipart("related")
-        msg["From"]    = EMAIL_SENDER
-        msg["To"]      = ", ".join(recipients)
-        msg["Subject"] = subject
-
-        alt = MIMEMultipart("alternative")
-        # Plain text fallback
+        # ── Plain text fallback ──
         plain = (
             f"AIPilot Labor Report — {hotel}\n"
             f"Period: {period}\n\n"
@@ -1173,24 +1330,86 @@ def send_aipilot_email(recipients: list, hotel: str, question: str,
             f"=== EXECUTIVE SUMMARY ===\n{summary}\n\n"
             f"Log into LaborPilot for interactive charts and full analytics."
         )
+
+        # ── Excel attachment — collect sheets ──
+        excel_sheets = {}
+
+        # Tables extracted from the AI-generated markdown in the summary
+        _, ai_tables = _summary_to_email_html(summary)
+        for i, df in enumerate(ai_tables, 1):
+            if not df.empty:
+                label = "Schedule" if i == 1 else f"Table_{i}"
+                # Try to guess a better name from first column header
+                if df.columns[0].lower() in ("department", "dept"):
+                    label = f"Schedule_{i}"
+                excel_sheets[label] = df
+
+        # Standard data tables from the DB fetch
+        db_table_map = {
+            "Department":  "dept",
+            "Employee OT": "emp_ot",
+            "Position":    "position",
+            "OT Risk":     "ot_risk",
+            "Schedule":    "schedule",
+            "Headcount":   "headcount_daily",
+        }
+        for label, key in db_table_map.items():
+            df = data.get(key)
+            if df is not None and not df.empty:
+                # Don't duplicate if already added from AI tables
+                if label not in excel_sheets:
+                    excel_sheets[label] = df
+
+        # ── Build MIME structure ──
+        # outer: multipart/mixed  (for file attachments)
+        outer = MIMEMultipart("mixed")
+        outer["From"]    = EMAIL_SENDER
+        outer["To"]      = ", ".join(recipients)
+        outer["Subject"] = subject
+
+        # inner: multipart/related  (for inline images)
+        related = MIMEMultipart("related")
+
+        # innermost: multipart/alternative  (plain + html)
+        alt = MIMEMultipart("alternative")
         alt.attach(MIMEText(plain, "plain"))
         alt.attach(MIMEText(html_body, "html"))
-        msg.attach(alt)
+        related.attach(alt)
 
-        # Attach chart images with CIDs
+        # Inline chart images (CID)
         for cid, png_bytes in chart_cids:
             img_part = MIMEImage(png_bytes, _subtype="png")
             img_part.add_header("Content-ID", f"<{cid}>")
             img_part.add_header("Content-Disposition", "inline",
                                 filename=f"{cid}.png")
-            msg.attach(img_part)
+            related.attach(img_part)
 
+        outer.attach(related)
+
+        # Excel attachment
+        if excel_sheets:
+            xlsx_bytes = _make_excel_bytes(excel_sheets)
+            from email.mime.base import MIMEBase
+            from email import encoders as _enc
+            xlsx_part = MIMEBase(
+                "application",
+                "vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            xlsx_part.set_payload(xlsx_bytes)
+            _enc.encode_base64(xlsx_part)
+            xlsx_part.add_header(
+                "Content-Disposition", "attachment", filename=filename
+            )
+            outer.attach(xlsx_part)
+
+        # ── Send ──
         context = ssl.create_default_context()
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as smtp:
             smtp.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            smtp.sendmail(EMAIL_SENDER, recipients, msg.as_string())
+            smtp.sendmail(EMAIL_SENDER, recipients, outer.as_string())
 
-        return True, f"Report sent to {', '.join(recipients)}"
+        attach_note = f" + Excel attachment ({len(excel_sheets)} sheet(s))" if excel_sheets else ""
+        return True, f"Report sent to {', '.join(recipients)}{attach_note}"
 
     except Exception as e:
         return False, f"Failed to send: {e}"

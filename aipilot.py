@@ -735,45 +735,82 @@ def render_charts(intent: str, data: dict):
 def render_aipilot(hotel: str):
     st.markdown("""
     <style>
+    /* ── AI card ── */
     .ai-card {
         background: linear-gradient(135deg,#f8f9ff,#ffffff);
         border: 1px solid #e0e4f0;
-        border-left: 4px solid #3D52A0;
-        border-radius: 10px;
+        border-left: 4px solid #6366f1;
+        border-radius: 12px;
         padding: 22px 26px;
         margin: 8px 0 14px;
         font-size: 15px;
-        line-height: 1.8;
+        line-height: 1.85;
         color: #1a1a2e;
         white-space: pre-wrap;
-        box-shadow: 0 2px 12px rgba(61,82,160,.07);
+        box-shadow: 0 2px 16px rgba(99,102,241,.07);
     }
     .ai-badge {
-        background: linear-gradient(135deg,#3D52A0,#8697C4);
+        background: linear-gradient(135deg,#6366f1,#a855f7);
         color:#fff; font-size:11px; font-weight:700;
         padding:3px 10px; border-radius:20px; letter-spacing:.5px;
     }
     .intent-tag {
-        display:inline-block; background:#e8f5e9; color:#2E7D32;
+        display:inline-block; background:#ede9fe; color:#6d28d9;
         font-size:11px; font-weight:700; padding:2px 10px;
         border-radius:12px; margin-left:8px;
     }
-    .mp { display:inline-block; background:#f0f4ff; border:1px solid #d0d8f5;
+    .mp { display:inline-block; background:#f5f3ff; border:1px solid #ddd6fe;
           border-radius:8px; padding:8px 16px; margin:4px; text-align:center; }
-    .mp .v { font-size:22px; font-weight:800; color:#3D52A0; }
+    .mp .v { font-size:22px; font-weight:800; color:#6366f1; }
     .mp .l { font-size:11px; color:#666; margin-top:2px; }
-    /* Smaller suggestion buttons */
-    div[data-testid="stHorizontalBlock"] button[kind="secondary"] {
-        padding: 4px 10px !important;
-        font-size: 12px !important;
-        border-radius: 20px !important;
+
+    /* ── ChatGPT-style textarea ── */
+    div[data-testid="stTextArea"] textarea {
+        border-radius: 16px !important;
+        border: 1.5px solid #e2e8f0 !important;
+        padding: 16px 20px !important;
+        font-size: 15px !important;
+        line-height: 1.6 !important;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.06) !important;
+        background: #ffffff !important;
+        transition: border-color 0.2s, box-shadow 0.2s !important;
+        resize: none !important;
+    }
+    div[data-testid="stTextArea"] textarea:focus {
+        border-color: #818cf8 !important;
+        box-shadow: 0 0 0 4px rgba(99,102,241,0.12), 0 4px 24px rgba(0,0,0,0.06) !important;
+        outline: none !important;
+    }
+    div[data-testid="stTextArea"] label {
+        font-size: 13px !important;
+        font-weight: 600 !important;
+        color: #64748b !important;
+        letter-spacing: 0.3px !important;
+    }
+
+    /* ── AI Generate button ── */
+    div[data-testid="stButton"] > button[kind="primary"] {
+        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #a855f7 100%) !important;
+        border: none !important;
+        border-radius: 14px !important;
+        font-weight: 700 !important;
+        font-size: 14px !important;
+        letter-spacing: 0.4px !important;
+        padding: 12px 28px !important;
+        box-shadow: 0 4px 20px rgba(99,102,241,0.45) !important;
+        color: #fff !important;
+        transition: all 0.2s ease !important;
+    }
+    div[data-testid="stButton"] > button[kind="primary"]:hover {
+        box-shadow: 0 6px 28px rgba(99,102,241,0.6) !important;
+        transform: translateY(-1px) !important;
     }
     </style>
     """, unsafe_allow_html=True)
 
     # ── Header ──
     st.markdown("""
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:6px;">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
             <div style="width:18px;height:18px;background:#3a3a3a;border-radius:4px;"></div>
             <div style="width:18px;height:18px;background:#e02020;border-radius:4px;"></div>
@@ -785,44 +822,40 @@ def render_aipilot(hotel: str):
             <span style="font-size:13px;color:#888;margin-left:8px;">Labor Intelligence</span>
         </div>
     </div>
-    <p style="color:#555;font-size:13px;margin-bottom:12px;">
-        Ask any labor question — OT, scheduling, cost, risk, efficiency, comparisons. Include the time period in your question.
+    <p style="color:#64748b;font-size:13px;margin-bottom:20px;">
+        Ask any labor question in plain English — OT, risk, cost, scheduling, comparisons.
+        Include the time period you want (e.g. "last week", "this month", "YTD").
     </p>
     """, unsafe_allow_html=True)
 
-    # ── Suggestion chips ──
-    st.markdown('<div style="margin-bottom:6px;font-size:12px;color:#888;font-weight:600;">Try asking:</div>',
-                unsafe_allow_html=True)
-
-    # Two rows of chips, 5 per row
-    for row_start in range(0, len(SUGGESTIONS), 5):
-        row_sug = SUGGESTIONS[row_start:row_start+5]
-        cols = st.columns(len(row_sug))
-        for i, sug in enumerate(row_sug):
-            if cols[i].button(sug, key=f"sug_{row_start+i}", use_container_width=True):
-                st.session_state["ai_question"] = sug
-                st.rerun()
-
-    st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
-
-    # ── Question input ──
+    # ── ChatGPT-style input area ──
     question = st.text_area(
-        "What do you want to know?",
-        placeholder="e.g.  'What was our overtime last week?'  ·  'Any OT risk this week?'  ·  'Create a mockup schedule'",
-        height=85,
+        "Ask a labor question",
+        placeholder=(
+            "e.g.  What was our overtime last week?   ·   "
+            "Is anyone at OT risk this week?   ·   "
+            "Compare this month's labor cost to last month   ·   "
+            "Create a mockup schedule for this week"
+        ),
+        height=110,
         key="ai_question",
     )
 
-    run_btn = st.button("Generate Report", type="primary")
+    run_btn = st.button("✦ Generate Insight", type="primary")
 
     if not run_btn:
         st.markdown("""
-        <div style="background:#f8f9ff;border:1px dashed #c5cde8;border-radius:10px;
-                    padding:28px;text-align:center;color:#888;margin-top:16px;">
-            <div style="font-size:30px;margin-bottom:8px;">🤖</div>
-            <div style="font-size:14px;font-weight:600;color:#555;">Ready to answer any labor question</div>
-            <div style="font-size:12px;margin-top:6px;line-height:1.8;">
-                Click a suggestion above or type your own question
+        <div style="background:linear-gradient(135deg,#faf5ff,#f0f4ff);
+                    border:1px solid #e9d5ff;border-radius:14px;
+                    padding:32px;text-align:center;margin-top:20px;">
+            <div style="font-size:36px;margin-bottom:10px;">✦</div>
+            <div style="font-size:15px;font-weight:700;color:#4c1d95;margin-bottom:6px;">
+                Your AI Labor Advisor is ready
+            </div>
+            <div style="font-size:13px;color:#7c3aed;line-height:1.9;">
+                "What was our overtime last week?" &nbsp;·&nbsp;
+                "Is anyone at OT risk this week?" &nbsp;·&nbsp;
+                "Which department cost the most this month?"
             </div>
         </div>""", unsafe_allow_html=True)
         return

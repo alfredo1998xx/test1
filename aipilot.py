@@ -1516,10 +1516,12 @@ def render_aipilot(hotel: str):
 
     # ── Model selector ──
     MODELS = {
-        "llama-3.3-70b-versatile":        "⚡ Llama 3.3 70B  — Recommended. Fast, smart, great for labor reports.",
-        "deepseek-r1-distill-llama-70b":  "🧠 DeepSeek R1 70B  — Deep reasoning. Best for complex analysis & comparisons.",
-        "mixtral-8x7b-32768":             "📚 Mixtral 8x7B  — Long context (32k tokens). Great for schedule-heavy queries.",
-        "llama-3.1-8b-instant":           "🪶 Llama 3.1 8B Instant  — Fastest & most token-efficient. Saves daily quota.",
+        "llama-3.3-70b-versatile":                        "⚡ Llama 3.3 70B Versatile  — Recommended. Fast, balanced, great for all labor reports.",
+        "meta-llama/llama-4-maverick-17b-128e-instruct":  "🦅 Llama 4 Maverick 17B  — Newest & smartest. Best quality responses.",
+        "meta-llama/llama-4-scout-17b-16e-instruct":      "🔭 Llama 4 Scout 17B  — Newer model, fast & capable.",
+        "qwen-qwq-32b":                                   "🧠 Qwen QwQ 32B  — Deep reasoning. Best for complex analysis & comparisons.",
+        "gemma2-9b-it":                                   "💎 Gemma 2 9B  — Google model. Fast, reliable, low token usage.",
+        "llama-3.1-8b-instant":                           "🪶 Llama 3.1 8B Instant  — Fastest & most token-efficient. Saves daily quota.",
     }
     selected_model = st.selectbox(
         "AI Model",
@@ -1664,10 +1666,12 @@ def render_aipilot(hotel: str):
     # ── AI Summary ──
     used_model = r.get("model", "llama-3.3-70b-versatile")
     model_label = {
-        "llama-3.3-70b-versatile":       "Llama 3.3 70B",
-        "deepseek-r1-distill-llama-70b": "DeepSeek R1 70B",
-        "mixtral-8x7b-32768":            "Mixtral 8x7B",
-        "llama-3.1-8b-instant":          "Llama 3.1 8B",
+        "llama-3.3-70b-versatile":                       "Llama 3.3 70B",
+        "meta-llama/llama-4-maverick-17b-128e-instruct": "Llama 4 Maverick",
+        "meta-llama/llama-4-scout-17b-16e-instruct":     "Llama 4 Scout",
+        "qwen-qwq-32b":                                  "Qwen QwQ 32B",
+        "gemma2-9b-it":                                  "Gemma 2 9B",
+        "llama-3.1-8b-instant":                          "Llama 3.1 8B",
     }.get(used_model, used_model)
     st.markdown(
         '<div style="display:flex;align-items:center;gap:10px;margin-top:18px;">'

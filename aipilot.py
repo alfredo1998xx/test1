@@ -410,18 +410,35 @@ def build_prompt(hotel: str, start: date, end: date,
 # ─────────────────────────────────────────────────────────────────────────────
 # GROQ API
 # ─────────────────────────────────────────────────────────────────────────────
+class GroqRateLimitError(Exception):
+    """Raised when Groq returns a 429 / token-limit error."""
+
+
 def call_groq(prompt: str) -> str:
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
-        return "⚠️ GROQ_API_KEY is not configured."
+        raise ValueError("GROQ_API_KEY secret is not configured.")
     client = Groq(api_key=api_key)
-    resp = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=900,
-    )
-    return resp.choices[0].message.content.strip()
+    try:
+        resp = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=900,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        msg = str(e)
+        if "429" in msg or "rate_limit" in msg.lower() or "rate limit" in msg.lower():
+            # Extract wait time if present
+            wait = ""
+            m = re.search(r'try again in ([^\.\'"]+)', msg, re.IGNORECASE)
+            if m:
+                wait = f" Please wait **{m.group(1).strip()}** before trying again."
+            raise GroqRateLimitError(
+                f"Daily AI token limit reached.{wait}"
+            ) from e
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1321,6 +1338,23 @@ def render_aipilot(hotel: str):
                     prompt  = build_prompt(hotel, start_date, end_date,
                                           question, intent, data)
                     summary = call_groq(prompt)
+                except GroqRateLimitError as e:
+                    st.markdown(f"""
+                    <div style="background:#fff7ed;border:1px solid #fed7aa;
+                                border-left:4px solid #f97316;border-radius:10px;
+                                padding:18px 22px;margin-top:16px;">
+                        <div style="font-size:15px;font-weight:700;color:#c2410c;
+                                    margin-bottom:6px;">⏳ AI Token Limit Reached</div>
+                        <div style="font-size:13px;color:#9a3412;line-height:1.7;">
+                            {str(e)}<br><br>
+                            The free Groq tier allows 100,000 tokens per day.
+                            Tokens reset every 24 hours — try again shortly or
+                            <a href="https://console.groq.com/settings/billing"
+                               target="_blank" style="color:#c2410c;font-weight:600;">
+                               upgrade your Groq plan</a> for higher limits.
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+                    st.stop()
                 except Exception as e:
                     st.error(f"AI error: {e}")
                     st.stop()

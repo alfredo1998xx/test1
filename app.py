@@ -1261,6 +1261,7 @@ menu_options = [
     "Cost and OT Mgmt",
     "Reports",
     "Scheduled Tasks",
+    "AIPilot",
 ]
 
 # Role-based menu access
@@ -11413,6 +11414,10 @@ elif main_choice == "Admin":
 
 
 
+
+elif main_choice == "AIPilot":
+    from aipilot import render_aipilot
+    render_aipilot(hotel_name)
 
 if __name__ == "__main__":
     pass

@@ -1,10 +1,11 @@
 """
 aipilot.py — AI-powered labor intelligence for LaborPilot
-Dynamic, conversational, executive-grade insights from your real data.
+Full database awareness: employees, schedules, positions, costs, OT, mockups.
 """
 
 import os
 import re
+import calendar
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -13,11 +14,11 @@ from datetime import date, timedelta, datetime
 from groq import Groq
 from sqlalchemy import text
 from db import ENGINE
+from email_sender import send_email
 
 
-# ── Natural-language date parser ─────────────────────────────────────────────
+# ── Date parser ───────────────────────────────────────────────────────────────
 def parse_dates_from_question(question: str):
-    """Infer a (start, end) date range from natural language in the question."""
     q = question.lower()
     today = date.today()
 
@@ -26,35 +27,42 @@ def parse_dates_from_question(question: str):
     if "yesterday" in q:
         d = today - timedelta(days=1)
         return d, d
+    if "next week" in q:
+        days_until_mon = (7 - today.weekday()) % 7 or 7
+        start = today + timedelta(days=days_until_mon)
+        return start, start + timedelta(days=6)
     if "this week" in q:
         start = today - timedelta(days=today.weekday())
         return start, today
     if "last week" in q:
         start = today - timedelta(days=today.weekday() + 7)
-        end   = start + timedelta(days=6)
-        return start, end
-    if "last 7 days" in q or "past 7 days" in q or "last week" in q:
+        return start, start + timedelta(days=6)
+    if "last 7 days" in q or "past 7 days" in q:
         return today - timedelta(days=6), today
     if "last 14 days" in q or "past 14 days" in q or "two weeks" in q:
         return today - timedelta(days=13), today
+    if "next month" in q:
+        if today.month == 12:
+            start = date(today.year + 1, 1, 1)
+        else:
+            start = date(today.year, today.month + 1, 1)
+        last_day = calendar.monthrange(start.year, start.month)[1]
+        return start, date(start.year, start.month, last_day)
     if "this month" in q:
-        start = today.replace(day=1)
-        return start, today
+        return today.replace(day=1), today
     if "last month" in q:
         first_this = today.replace(day=1)
         last_prev  = first_this - timedelta(days=1)
-        start      = last_prev.replace(day=1)
-        return start, last_prev
-    if "last 30 days" in q or "past 30 days" in q or "past month" in q:
+        return last_prev.replace(day=1), last_prev
+    if "last 30 days" in q or "past 30 days" in q:
         return today - timedelta(days=29), today
-    if "last 60 days" in q or "past 60 days" in q or "two months" in q:
+    if "last 60 days" in q or "past 60 days" in q:
         return today - timedelta(days=59), today
-    if "last 90 days" in q or "quarter" in q or "past quarter" in q:
+    if "last 90 days" in q or "quarter" in q:
         return today - timedelta(days=89), today
     if "this year" in q or "ytd" in q or "year to date" in q:
         return today.replace(month=1, day=1), today
 
-    # Try to find explicit month names
     months = {
         "january": 1, "february": 2, "march": 3, "april": 4,
         "may": 5, "june": 6, "july": 7, "august": 8,
@@ -65,17 +73,14 @@ def parse_dates_from_question(question: str):
             year = today.year
             if month_num > today.month:
                 year -= 1
-            import calendar
             last_day = calendar.monthrange(year, month_num)[1]
             return date(year, month_num, 1), date(year, month_num, last_day)
 
-    # Default: last 30 days
     return today - timedelta(days=29), today
 
 
-# ── Dynamic data fetching based on question intent ───────────────────────────
+# ── Intent detection ──────────────────────────────────────────────────────────
 def detect_intent(question: str) -> list:
-    """Detect what the user is asking about to pull the right data."""
     q = question.lower()
     intents = []
     if any(w in q for w in ["overtime", "ot ", "ot,", "overti"]):
@@ -84,29 +89,62 @@ def detect_intent(question: str) -> list:
         intents.append("cost")
     if any(w in q for w in ["department", "dept", "housekeeping", "front desk", "food", "f&b", "engineering"]):
         intents.append("department")
-    if any(w in q for w in ["employee", "staff", "worker", "who", "top", "highest", "most"]):
+    if any(w in q for w in ["employee", "staff", "worker", "who", "top", "highest", "most", "team"]):
         intents.append("employee")
-    if any(w in q for w in ["trend", "daily", "day by day", "week by week", "over time", "pattern"]):
+    if any(w in q for w in ["trend", "daily", "day by day", "over time", "pattern"]):
         intents.append("trend")
-    if any(w in q for w in ["schedule", "scheduled", "shift", "roster"]):
-        intents.append("schedule")
+    if any(w in q for w in ["schedule", "scheduled", "shift", "roster", "mockup", "mock", "mock-up",
+                              "next week", "plan", "coverage", "assign", "rotation"]):
+        intents.append("schedule_mockup")
     if any(w in q for w in ["room", "occupancy", "occ", "occupied"]):
         intents.append("rooms")
+    if any(w in q for w in ["position", "role", "title", "job"]):
+        intents.append("positions")
     if not intents:
         intents = ["overtime", "cost", "department", "employee", "trend"]
     return intents
 
 
+# ── DB helpers ────────────────────────────────────────────────────────────────
 def _query(sql: str, params: dict) -> pd.DataFrame:
     with ENGINE.connect() as conn:
         return pd.read_sql_query(text(sql), conn, params=params)
 
 
-def fetch_data(hotel: str, start: date, end: date, intents: list) -> dict:
+def fetch_employees(hotel: str) -> pd.DataFrame:
+    return _query("""
+        SELECT e.id, e.name, e.department, e.role, e.hourly_rate, e.emp_type
+        FROM   employee e
+        WHERE  e.hotel_name = :hotel
+        ORDER  BY e.department, e.name
+    """, {"hotel": hotel})
+
+
+def fetch_positions(hotel: str) -> pd.DataFrame:
+    return _query("""
+        SELECT p.id, p.name AS position, d.name AS department
+        FROM   positions p
+        JOIN   departments d ON d.id = p.department_id
+        WHERE  p.hotel_name = :hotel
+        ORDER  BY d.name, p.name
+    """, {"hotel": hotel})
+
+
+def fetch_existing_schedule(hotel: str, start: date, end: date) -> pd.DataFrame:
+    return _query("""
+        SELECT e.name, e.department, e.role, s.day, s.shift_type
+        FROM   schedule s
+        JOIN   employee e ON e.id = s.emp_id AND e.hotel_name = :hotel
+        WHERE  s.hotel_name = :hotel
+          AND  s.day BETWEEN :start AND :end
+        ORDER  BY s.day, e.department, e.name
+    """, {"hotel": hotel, "start": str(start), "end": str(end)})
+
+
+def fetch_labor_data(hotel: str, start: date, end: date, intents: list) -> dict:
     p = {"hotel": hotel, "start": str(start), "end": str(end)}
     result = {}
 
-    # Always fetch totals
     result["totals"] = _query("""
         SELECT COALESCE(SUM(a.hours), 0)    AS total_hours,
                COALESCE(SUM(a.ot_hours), 0) AS total_ot_hours,
@@ -119,7 +157,7 @@ def fetch_data(hotel: str, start: date, end: date, intents: list) -> dict:
           AND  a.date BETWEEN :start AND :end
     """, p)
 
-    if "department" in intents or "cost" in intents or "overtime" in intents:
+    if any(i in intents for i in ["department", "cost", "overtime", "schedule_mockup"]):
         result["by_dept"] = _query("""
             SELECT e.department,
                    COALESCE(SUM(a.hours), 0)    AS total_hours,
@@ -135,9 +173,9 @@ def fetch_data(hotel: str, start: date, end: date, intents: list) -> dict:
             ORDER  BY total_hours DESC
         """, p)
 
-    if "employee" in intents or "overtime" in intents:
+    if any(i in intents for i in ["employee", "overtime", "schedule_mockup"]):
         result["top_employees"] = _query("""
-            SELECT e.name, e.department,
+            SELECT e.name, e.department, e.role,
                    COALESCE(SUM(a.hours), 0)    AS total_hours,
                    COALESCE(SUM(a.ot_hours), 0) AS ot_hours,
                    COALESCE(SUM(a.reg_pay + a.ot_pay), 0) AS total_pay
@@ -145,12 +183,12 @@ def fetch_data(hotel: str, start: date, end: date, intents: list) -> dict:
             JOIN   employee e ON e.id = a.emp_id AND e.hotel_name = :hotel
             WHERE  a.hotel_name = :hotel
               AND  a.date BETWEEN :start AND :end
-            GROUP  BY e.name, e.department
+            GROUP  BY e.name, e.department, e.role
             ORDER  BY ot_hours DESC, total_hours DESC
-            LIMIT  12
+            LIMIT  15
         """, p)
 
-    if "trend" in intents or "cost" in intents or "overtime" in intents:
+    if any(i in intents for i in ["trend", "cost", "overtime"]):
         result["daily"] = _query("""
             SELECT a.date,
                    COALESCE(SUM(a.hours), 0)              AS total_hours,
@@ -163,38 +201,21 @@ def fetch_data(hotel: str, start: date, end: date, intents: list) -> dict:
             ORDER  BY a.date
         """, p)
 
-    if "schedule" in intents:
-        result["schedule"] = _query("""
-            SELECT s.day AS date,
-                   COUNT(DISTINCT s.emp_id) AS headcount,
-                   s.shift_type
-            FROM   schedule s
-            WHERE  s.hotel_name = :hotel
-              AND  s.day BETWEEN :start AND :end
-            GROUP  BY s.day, s.shift_type
-            ORDER  BY s.day
-        """, p)
-
-    if "rooms" in intents:
-        result["rooms"] = _query("""
-            SELECT date, occupied
-            FROM   rooms
-            WHERE  hotel_name = :hotel
-              AND  date BETWEEN :start AND :end
-            ORDER  BY date
-        """, p)
-
     return result
 
 
-def build_dynamic_prompt(hotel: str, start: date, end: date,
-                          question: str, data: dict, intents: list) -> str:
+# ── Build AI prompt ───────────────────────────────────────────────────────────
+def build_prompt(hotel: str, start: date, end: date,
+                 question: str, data: dict, intents: list,
+                 employees_df: pd.DataFrame, positions_df: pd.DataFrame,
+                 existing_schedule_df: pd.DataFrame) -> str:
+
     today = date.today()
     days = (end - start).days + 1
-
-    # Format date label naturally
     if start == end:
         period_label = start.strftime("%B %d, %Y")
+    elif start == today + timedelta(days=(7 - today.weekday()) % 7 or 7):
+        period_label = f"next week ({start.strftime('%b %d')} – {end.strftime('%b %d, %Y')})"
     elif start == today - timedelta(days=6) and end == today:
         period_label = "the last 7 days"
     elif start == today.replace(day=1):
@@ -204,213 +225,246 @@ def build_dynamic_prompt(hotel: str, start: date, end: date,
 
     sections = []
 
-    # Totals
-    t = data.get("totals", pd.DataFrame())
-    if not t.empty:
-        r = t.iloc[0]
-        total_hours   = float(r.get("total_hours", 0))
-        total_ot      = float(r.get("total_ot_hours", 0))
-        reg_pay       = float(r.get("total_reg_pay", 0))
-        ot_pay        = float(r.get("total_ot_pay", 0))
-        total_cost    = reg_pay + ot_pay
-        unique_emps   = int(r.get("unique_employees", 0))
-        active_days   = int(r.get("active_days", 0))
-        ot_pct        = (total_ot / total_hours * 100) if total_hours > 0 else 0
-        ot_cost_pct   = (ot_pay / total_cost * 100) if total_cost > 0 else 0
-        sections.append(f"""SUMMARY TOTALS ({period_label}, {active_days} days of data):
+    # Always include full employee roster
+    if not employees_df.empty:
+        sections.append("FULL EMPLOYEE ROSTER:\n" + employees_df.to_string(index=False))
+
+    # Positions
+    if not positions_df.empty:
+        sections.append("AVAILABLE POSITIONS BY DEPARTMENT:\n" + positions_df.to_string(index=False))
+
+    # Existing schedule in range
+    if not existing_schedule_df.empty:
+        sections.append(f"EXISTING SCHEDULE ({period_label}):\n" + existing_schedule_df.to_string(index=False))
+    else:
+        sections.append(f"EXISTING SCHEDULE ({period_label}): No schedule data found for this period.")
+
+    # Labor actuals
+    totals = data.get("totals", pd.DataFrame())
+    if not totals.empty:
+        r = totals.iloc[0]
+        total_hours  = float(r.get("total_hours", 0))
+        total_ot     = float(r.get("total_ot_hours", 0))
+        reg_pay      = float(r.get("total_reg_pay", 0))
+        ot_pay       = float(r.get("total_ot_pay", 0))
+        total_cost   = reg_pay + ot_pay
+        unique_emps  = int(r.get("unique_employees", 0))
+        active_days  = int(r.get("active_days", 0))
+        ot_pct       = (total_ot / total_hours * 100) if total_hours > 0 else 0
+        ot_cost_pct  = (ot_pay / total_cost * 100) if total_cost > 0 else 0
+        sections.append(f"""LABOR ACTUALS ({period_label}, {active_days} days):
 - Total Hours: {total_hours:,.1f} across {unique_emps} employees
 - OT Hours: {total_ot:,.1f} ({ot_pct:.1f}% of total)
 - Regular Pay: ${reg_pay:,.2f}
 - OT Pay: ${ot_pay:,.2f} ({ot_cost_pct:.1f}% of total cost)
 - Total Labor Cost: ${total_cost:,.2f}""")
 
-    # Department breakdown
     dept_df = data.get("by_dept", pd.DataFrame())
     if not dept_df.empty:
         sections.append("DEPARTMENT BREAKDOWN:\n" + dept_df.to_string(index=False))
 
-    # Employees
     emp_df = data.get("top_employees", pd.DataFrame())
     if not emp_df.empty:
-        sections.append("TOP EMPLOYEES (by OT then total hours):\n" + emp_df.head(10).to_string(index=False))
+        sections.append("EMPLOYEE HOURS/OT DETAIL:\n" + emp_df.to_string(index=False))
 
-    # Daily trend (summarized)
     daily_df = data.get("daily", pd.DataFrame())
     if not daily_df.empty and len(daily_df) <= 14:
         sections.append("DAILY BREAKDOWN:\n" + daily_df.to_string(index=False))
     elif not daily_df.empty:
         high_day  = daily_df.loc[daily_df["total_hours"].idxmax()]
-        high_ot   = daily_df.loc[daily_df["ot_hours"].idxmax()]
         avg_hours = daily_df["total_hours"].mean()
-        sections.append(f"""DAILY TREND SUMMARY:
-- Average daily hours: {avg_hours:,.1f}
-- Highest hours day: {high_day['date']} ({high_day['total_hours']:,.1f} hrs)
-- Highest OT day: {high_ot['date']} ({high_ot['ot_hours']:,.1f} OT hrs)""")
+        sections.append(f"DAILY TREND: Avg {avg_hours:,.1f} hrs/day. Peak: {high_day['date']} ({high_day['total_hours']:,.1f} hrs)")
 
-    # Rooms
-    rooms_df = data.get("rooms", pd.DataFrame())
-    if not rooms_df.empty:
-        avg_occ = rooms_df["occupied"].mean()
-        sections.append(f"ROOM OCCUPANCY: Average {avg_occ:.0f} rooms/night over {len(rooms_df)} days.")
+    data_block = "\n\n".join(sections) if sections else "No data available."
 
-    data_block = "\n\n".join(sections) if sections else "No data found for this period."
+    is_schedule_request = "schedule_mockup" in intents
 
-    return f"""You are a world-class hotel labor analytics advisor. You speak directly to a hotel owner or CEO.
-Your voice: confident, sharp, plain English. You answer EXACTLY what was asked — nothing more, nothing less.
+    if is_schedule_request:
+        schedule_instruction = f"""
+IMPORTANT — The user is asking for a SCHEDULE MOCKUP. You must:
+1. Use the real employee names from the FULL EMPLOYEE ROSTER above.
+2. Build a complete 7-day schedule grid for {period_label}.
+3. Assign shifts based on department, role, and existing patterns.
+4. Format it as a clear table: Employee Name | Department | Role | Mon | Tue | Wed | Thu | Fri | Sat | Sun
+5. Use shift codes: AM (morning), PM (afternoon), MID (mid-shift), OFF (day off), RDO (regular day off).
+6. Make sure coverage is realistic — spread days off, avoid consecutive OT risk.
+7. After the table, write a 2-3 sentence staffing note for leadership.
+8. Begin the table immediately after your opening line — no preamble.
+"""
+    else:
+        schedule_instruction = ""
+
+    return f"""You are the most capable hotel labor analytics and operations AI available.
+You have FULL access to the hotel's live data below. You answer EXACTLY what was asked, using real names and real numbers.
+Your voice: confident, direct, CEO-level plain English.
 
 HOTEL: {hotel}
-USER'S EXACT QUESTION: "{question}"
-ANALYSIS PERIOD: {period_label}
+PERIOD: {period_label}
+USER'S QUESTION: "{question}"
+{schedule_instruction}
 
---- DATA ---
+=== LIVE HOTEL DATA ===
 {data_block}
 
---- HOW TO RESPOND ---
-1. Answer the question directly in 1-2 bold sentences. Lead with the most important number.
-2. Follow with 2-3 sentences of supporting context — what's driving it, what it means for the business.
-3. Give 2-3 specific, numbered action points — each with a real number, not vague advice.
-4. End with one sharp "Bottom Line" sentence — the single thing they should act on TODAY.
-
-Rules:
-- Respond ONLY to what was asked. Do not add topics they didn't ask about.
-- Use dollar signs, percentages, and hours where relevant.
-- Keep total response under 250 words.
-- Write in paragraphs, not bullet lists (except the action points).
-- No markdown headers or bold markup in your output — write naturally."""
+=== RESPONSE RULES ===
+- Answer EXACTLY what was asked. Use real employee names, departments, positions from the data above.
+- Lead with the most important number or finding in the first sentence.
+- For schedules: produce an actual formatted schedule table with real names — NOT a generic template.
+- For analytics: give 2-3 numbered action points with real numbers.
+- End with one "Bottom Line" — the single most important thing to act on.
+- Under 300 words total. No markdown headers. Write naturally."""
 
 
+# ── Call Groq ─────────────────────────────────────────────────────────────────
 def call_groq(prompt: str) -> str:
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
-        return "GROQ_API_KEY is not configured. Please add it in the Secrets panel."
+        return "GROQ_API_KEY not configured. Please add it in Secrets."
     client = Groq(api_key=api_key)
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.6,
-        max_tokens=600,
+        temperature=0.5,
+        max_tokens=900,
     )
     return response.choices[0].message.content.strip()
 
 
-def render_smart_charts(data: dict, intents: list, question: str):
-    """Render only charts relevant to the question."""
-    charts_rendered = 0
+# ── Charts ────────────────────────────────────────────────────────────────────
+def render_charts(data: dict, intents: list) -> int:
+    dept_df   = data.get("by_dept", pd.DataFrame())
+    daily_df  = data.get("daily", pd.DataFrame())
+    emp_df    = data.get("top_employees", pd.DataFrame())
+    rendered  = 0
+    cols      = st.columns(2)
+    c         = 0
 
+    ACCENT1   = "#3D52A0"
+    ACCENT2   = "#2196F3"
+    ACCENT_OT = "#FF5722"
+    base = dict(
+        template="plotly_white",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(t=40, b=30, l=10, r=10),
+        title_font=dict(size=13, color="#3D52A0"),
+        font=dict(color="#444", size=11),
+    )
+
+    if not dept_df.empty:
+        with cols[c % 2]:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=dept_df["department"], y=dept_df["total_hours"],
+                                 name="Reg Hours", marker_color=ACCENT1, opacity=0.85))
+            fig.add_trace(go.Bar(x=dept_df["department"], y=dept_df["ot_hours"],
+                                 name="OT Hours", marker_color=ACCENT_OT, opacity=0.9))
+            fig.update_layout(**base, title="Hours by Department", barmode="stack",
+                              legend=dict(orientation="h", y=1.12, x=0), xaxis_tickangle=-25)
+            st.plotly_chart(fig, use_container_width=True)
+            rendered += 1
+        c += 1
+
+    if not dept_df.empty and "cost" in intents:
+        with cols[c % 2]:
+            fig2 = go.Figure()
+            fig2.add_trace(go.Bar(x=dept_df["department"], y=dept_df["reg_pay"],
+                                  name="Regular Pay", marker_color=ACCENT2, opacity=0.85))
+            fig2.add_trace(go.Bar(x=dept_df["department"], y=dept_df["ot_pay"],
+                                  name="OT Pay", marker_color=ACCENT_OT, opacity=0.9))
+            fig2.update_layout(**base, title="Labor Cost by Department", barmode="stack",
+                               legend=dict(orientation="h", y=1.12, x=0), xaxis_tickangle=-25)
+            st.plotly_chart(fig2, use_container_width=True)
+            rendered += 1
+        c += 1
+
+    if not daily_df.empty:
+        with cols[c % 2]:
+            fig3 = go.Figure()
+            fig3.add_trace(go.Scatter(x=daily_df["date"], y=daily_df["total_hours"],
+                                      mode="lines+markers", name="Total Hours",
+                                      line=dict(color=ACCENT1, width=2.5),
+                                      fill="tozeroy", fillcolor="rgba(61,82,160,0.07)"))
+            fig3.add_trace(go.Scatter(x=daily_df["date"], y=daily_df["ot_hours"],
+                                      mode="lines+markers", name="OT Hours",
+                                      line=dict(color=ACCENT_OT, width=2, dash="dot")))
+            fig3.update_layout(**base, title="Daily Hours Trend",
+                               legend=dict(orientation="h", y=1.12, x=0))
+            st.plotly_chart(fig3, use_container_width=True)
+            rendered += 1
+        c += 1
+
+    ot_emp = emp_df[emp_df["ot_hours"] > 0].head(8) if not emp_df.empty else pd.DataFrame()
+    if not ot_emp.empty:
+        with cols[c % 2]:
+            fig4 = go.Figure(go.Bar(
+                x=ot_emp["ot_hours"], y=ot_emp["name"], orientation="h",
+                marker=dict(color=ot_emp["ot_hours"],
+                            colorscale=[[0, ACCENT1], [1, ACCENT_OT]], showscale=False),
+                text=ot_emp["ot_hours"].apply(lambda x: f"{x:.1f}h"), textposition="inside",
+            ))
+            fig4.update_layout(**base, title="Top OT Employees",
+                               yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig4, use_container_width=True)
+            rendered += 1
+        c += 1
+
+    return rendered
+
+
+# ── Email sender ──────────────────────────────────────────────────────────────
+def send_ai_report(recipients: list, hotel: str, question: str,
+                   summary: str, period_label: str, data: dict):
+    """Build and send an HTML email with the AI report."""
     dept_df  = data.get("by_dept", pd.DataFrame())
     daily_df = data.get("daily", pd.DataFrame())
     emp_df   = data.get("top_employees", pd.DataFrame())
+    totals   = data.get("totals", pd.DataFrame())
 
-    chart_cols = st.columns(2)
-    col_idx = 0
+    t = totals.iloc[0] if not totals.empty else {}
+    total_hours  = float(t.get("total_hours", 0))
+    total_ot     = float(t.get("total_ot_hours", 0))
+    total_cost   = float(t.get("total_reg_pay", 0)) + float(t.get("total_ot_pay", 0))
+    ot_pay       = float(t.get("total_ot_pay", 0))
 
-    CHART_BG    = "rgba(0,0,0,0)"
-    GRID_COLOR  = "rgba(0,0,0,0.06)"
-    FONT_COLOR  = "#444"
-    ACCENT1     = "#2196F3"
-    ACCENT2     = "#4CAF50"
-    ACCENT_OT   = "#FF5722"
+    # Build plain-text body
+    lines = [
+        f"AIPilot Labor Report — {hotel}",
+        f"Period: {period_label}",
+        "=" * 60,
+        "",
+        f"QUESTION: {question}",
+        "",
+        "AI SUMMARY:",
+        summary,
+        "",
+        "KEY METRICS:",
+        f"  Total Hours    : {total_hours:,.1f}",
+        f"  OT Hours       : {total_ot:,.1f}",
+        f"  Total Cost     : ${total_cost:,.2f}",
+        f"  OT Pay         : ${ot_pay:,.2f}",
+        "",
+    ]
 
-    base_layout = dict(
-        template="plotly_white",
-        paper_bgcolor=CHART_BG,
-        plot_bgcolor=CHART_BG,
-        font=dict(color=FONT_COLOR, size=11),
-        margin=dict(t=40, b=30, l=10, r=10),
-        xaxis=dict(gridcolor=GRID_COLOR, showline=False),
-        yaxis=dict(gridcolor=GRID_COLOR, showline=False),
-        title_font=dict(size=13, color="#3D52A0"),
-    )
+    if not dept_df.empty:
+        lines.append("DEPARTMENT BREAKDOWN:")
+        lines.append(dept_df.to_string(index=False))
+        lines.append("")
 
-    # Chart: Hours by Department
-    if not dept_df.empty and ("department" in intents or "cost" in intents or len(intents) >= 3):
-        with chart_cols[col_idx % 2]:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=dept_df["department"], y=dept_df["total_hours"],
-                name="Reg Hours", marker_color=ACCENT1, opacity=0.85,
-            ))
-            fig.add_trace(go.Bar(
-                x=dept_df["department"], y=dept_df["ot_hours"],
-                name="OT Hours", marker_color=ACCENT_OT, opacity=0.9,
-            ))
-            fig.update_layout(**base_layout, title="Hours by Department",
-                              barmode="stack",
-                              legend=dict(orientation="h", y=1.12, x=0),
-                              xaxis_tickangle=-25)
-            st.plotly_chart(fig, use_container_width=True)
-            charts_rendered += 1
-        col_idx += 1
+    if not emp_df.empty:
+        lines.append("TOP EMPLOYEES (OT):")
+        lines.append(emp_df.head(10).to_string(index=False))
+        lines.append("")
 
-    # Chart: Cost breakdown by department
-    if not dept_df.empty and "cost" in intents:
-        with chart_cols[col_idx % 2]:
-            dept_df["total_cost"] = dept_df["reg_pay"] + dept_df["ot_pay"]
-            fig2 = go.Figure()
-            fig2.add_trace(go.Bar(
-                x=dept_df["department"], y=dept_df["reg_pay"],
-                name="Regular Pay", marker_color=ACCENT2, opacity=0.85,
-            ))
-            fig2.add_trace(go.Bar(
-                x=dept_df["department"], y=dept_df["ot_pay"],
-                name="OT Pay", marker_color=ACCENT_OT, opacity=0.9,
-            ))
-            fig2.update_layout(**base_layout, title="Labor Cost by Department",
-                               barmode="stack",
-                               legend=dict(orientation="h", y=1.12, x=0),
-                               xaxis_tickangle=-25)
-            st.plotly_chart(fig2, use_container_width=True)
-            charts_rendered += 1
-        col_idx += 1
+    lines.append("—")
+    lines.append(f"Sent from LaborPilot AIPilot · {date.today().strftime('%B %d, %Y')}")
 
-    # Chart: Daily trend
-    if not daily_df.empty and ("trend" in intents or "overtime" in intents or charts_rendered < 2):
-        with chart_cols[col_idx % 2]:
-            fig3 = go.Figure()
-            fig3.add_trace(go.Scatter(
-                x=daily_df["date"], y=daily_df["total_hours"],
-                mode="lines+markers", name="Total Hours",
-                line=dict(color=ACCENT1, width=2.5),
-                fill="tozeroy", fillcolor="rgba(123,104,238,0.1)",
-            ))
-            fig3.add_trace(go.Scatter(
-                x=daily_df["date"], y=daily_df["ot_hours"],
-                mode="lines+markers", name="OT Hours",
-                line=dict(color=ACCENT_OT, width=2, dash="dot"),
-            ))
-            fig3.update_layout(**base_layout, title="Daily Hours Trend",
-                               legend=dict(orientation="h", y=1.12, x=0))
-            st.plotly_chart(fig3, use_container_width=True)
-            charts_rendered += 1
-        col_idx += 1
+    body = "\n".join(lines)
+    subject = f"AIPilot Report — {hotel} | {period_label}"
 
-    # Chart: Top OT employees
-    if not emp_df.empty and ("employee" in intents or "overtime" in intents or charts_rendered < 2):
-        ot_emp = emp_df[emp_df["ot_hours"] > 0].head(8)
-        if not ot_emp.empty:
-            with chart_cols[col_idx % 2]:
-                fig4 = go.Figure(go.Bar(
-                    x=ot_emp["ot_hours"], y=ot_emp["name"],
-                    orientation="h",
-                    marker=dict(
-                        color=ot_emp["ot_hours"],
-                        colorscale=[[0, ACCENT1], [1, ACCENT_OT]],
-                        showscale=False,
-                    ),
-                    text=ot_emp["ot_hours"].apply(lambda x: f"{x:.1f}h"),
-                    textposition="inside",
-                ))
-                fig4.update_layout(**base_layout, title="Top OT Employees",
-                                   yaxis=dict(autorange="reversed",
-                                              gridcolor=GRID_COLOR))
-                st.plotly_chart(fig4, use_container_width=True)
-                charts_rendered += 1
-            col_idx += 1
-
-    return charts_rendered
+    send_email(recipients, subject, body)
 
 
-# ── Main page renderer ────────────────────────────────────────────────────────
+# ── Main render ───────────────────────────────────────────────────────────────
 def render_aipilot(hotel: str):
     st.markdown("""
     <style>
@@ -420,7 +474,7 @@ def render_aipilot(hotel: str):
         box-shadow: 0 4px 20px rgba(61,82,160,0.2);
     }
     .ai-title { font-size: 26px; font-weight: 900; color: #ffffff; letter-spacing: -0.5px; line-height: 1.15; margin-bottom: 2px; }
-    .ai-subtitle { color: rgba(255,255,255,0.72); font-size: 13px; margin-top: 2px; }
+    .ai-subtitle { color: rgba(255,255,255,0.75); font-size: 13px; margin-top: 2px; }
     .ai-live-badge {
         display: inline-flex; align-items: center; gap: 5px;
         background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3);
@@ -441,30 +495,45 @@ def render_aipilot(hotel: str):
     .ai-model-tag {
         display: inline-flex; align-items: center; gap: 6px;
         background: linear-gradient(135deg, #3D52A0, #8697C4);
-        border-radius: 20px; padding: 3px 12px; font-size: 11px; color: #fff; font-weight: 600; margin-bottom: 10px;
+        border-radius: 20px; padding: 3px 12px; font-size: 11px; color: #fff; font-weight: 600;
+        margin-bottom: 10px; letter-spacing: 0.3px;
     }
     .ai-metrics-row { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0 4px 0; }
-    .ai-metric { background: #f0f4ff; border: 1px solid #d0d8f5; border-radius: 10px; padding: 10px 16px; min-width: 110px; text-align: center; }
+    .ai-metric {
+        background: #f0f4ff; border: 1px solid #d0d8f5;
+        border-radius: 10px; padding: 10px 16px; min-width: 110px; text-align: center;
+    }
     .ai-metric .val { font-size: 20px; font-weight: 800; color: #3D52A0; line-height: 1.2; }
     .ai-metric .val.red { color: #FF5722; }
     .ai-metric .val.teal { color: #2196F3; }
     .ai-metric .lbl { font-size: 10px; color: #888; margin-top: 2px; }
     .ai-period-badge {
         display: inline-flex; align-items: center; gap: 5px;
-        background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 4px 12px;
-        font-size: 11px; color: #3D52A0; margin-bottom: 10px;
+        background: #eef2ff; border: 1px solid #c7d2fe;
+        border-radius: 8px; padding: 4px 12px; font-size: 11px; color: #3D52A0; margin-bottom: 10px;
     }
     .ai-charts-header { color: #3D52A0; font-size: 12px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; margin: 20px 0 6px 0; }
     .ai-charts-divider { height: 1px; background: linear-gradient(90deg, #3D52A0, transparent); margin-bottom: 12px; opacity: 0.2; }
-    .ai-empty { background: #f8f9ff; border: 1px dashed #c7d2fe; border-radius: 12px; padding: 48px 24px; text-align: center; margin-top: 8px; }
+    .ai-email-card {
+        background: #f0f4ff; border: 1px solid #c7d2fe; border-radius: 10px;
+        padding: 18px 22px; margin-top: 20px;
+    }
+    .ai-email-title { font-size: 13px; font-weight: 700; color: #3D52A0; margin-bottom: 10px; }
+    .ai-empty {
+        background: #f8f9ff; border: 1px dashed #c7d2fe; border-radius: 12px;
+        padding: 48px 24px; text-align: center; margin-top: 8px;
+    }
     .ai-empty-icon { font-size: 40px; margin-bottom: 12px; }
     .ai-empty-title { color: #3D52A0; font-size: 15px; font-weight: 700; margin-bottom: 6px; }
     .ai-empty-sub { color: #888; font-size: 13px; }
-    .ai-suggestion { display: inline-block; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 6px 14px; margin: 4px; font-size: 12px; color: #3D52A0; cursor: pointer; }
+    .ai-suggestion {
+        display: inline-block; background: #eef2ff; border: 1px solid #c7d2fe;
+        border-radius: 8px; padding: 6px 14px; margin: 4px; font-size: 12px; color: #3D52A0;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-    # ── Hero header ──
+    # ── Hero ──
     st.markdown(f"""
     <div class="ai-hero">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;">
@@ -472,21 +541,19 @@ def render_aipilot(hotel: str):
                 <div class="ai-title">AIPilot</div>
                 <div class="ai-subtitle">Labor Intelligence for {hotel}</div>
             </div>
-            <div class="ai-live-badge">
-                <span class="ai-live-dot"></span> LIVE DATA
-            </div>
+            <div class="ai-live-badge"><span class="ai-live-dot"></span> LIVE DATA</div>
         </div>
-        <div style="margin-top:14px;color:rgba(200,184,255,0.5);font-size:13px;line-height:1.6;">
-            Ask anything about your labor operations in plain English.<br>
-            I'll pull your real data and give you a straight answer — CEO-grade, no fluff.
+        <div style="margin-top:12px;color:rgba(255,255,255,0.6);font-size:13px;line-height:1.6;">
+            Ask anything — schedules, OT risk, cost analysis, staff mockups, trends.<br>
+            I read your entire database and give you real answers with real names.
         </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Search input ──
+    # ── Input ──
     question = st.text_area(
         "",
-        placeholder='e.g. "Who had the most overtime last week?" · "What is our total labor cost this month?" · "Which department is most expensive?"',
+        placeholder='e.g. "Create a mockup schedule for housekeeping next week" · "Who had the most OT this month?" · "What is our total labor cost?"',
         height=80,
         key="ai_question",
         label_visibility="collapsed",
@@ -495,41 +562,33 @@ def render_aipilot(hotel: str):
     st.markdown("""
     <style>
     div[data-testid="stTextArea"] textarea {
-        background: #ffffff !important;
-        border: 1.5px solid #c7d2fe !important;
-        border-radius: 10px !important;
-        color: #1a1a2e !important;
-        font-size: 14px !important;
-        padding: 14px 16px !important;
+        background: #ffffff !important; border: 1.5px solid #c7d2fe !important;
+        border-radius: 10px !important; color: #1a1a2e !important;
+        font-size: 14px !important; padding: 14px 16px !important;
         box-shadow: 0 2px 8px rgba(61,82,160,0.06) !important;
-        transition: border-color 0.2s, box-shadow 0.2s !important;
     }
     div[data-testid="stTextArea"] textarea:focus {
         border-color: #3D52A0 !important;
         box-shadow: 0 0 0 3px rgba(61,82,160,0.1) !important;
     }
-    div[data-testid="stTextArea"] textarea::placeholder {
-        color: rgba(61,82,160,0.4) !important;
-    }
+    div[data-testid="stTextArea"] textarea::placeholder { color: rgba(61,82,160,0.4) !important; }
     </style>
     """, unsafe_allow_html=True)
 
-    col_btn, col_hint = st.columns([2, 5])
-    with col_btn:
-        run = st.button("✦ Ask AIPilot", type="primary", use_container_width=True)
+    run = st.button("Ask AIPilot", type="primary")
 
     if not run:
         st.markdown("""
         <div class="ai-empty">
-            <div class="ai-empty-icon">✦</div>
+            <div class="ai-empty-icon">🤖</div>
             <div class="ai-empty-title">What do you want to know?</div>
-            <div class="ai-empty-sub">Try one of these:</div>
-            <div style="margin-top:10px;">
-                <span class="ai-suggestion">Who had the most OT last week?</span>
-                <span class="ai-suggestion">What's our total labor cost this month?</span>
-                <span class="ai-suggestion">Which department is over budget?</span>
-                <span class="ai-suggestion">Show me the daily hours trend</span>
-                <span class="ai-suggestion">Who are our top overtime earners?</span>
+            <div class="ai-empty-sub">I can read your full database — employees, schedules, costs, OT — and answer anything.</div>
+            <div style="margin-top:12px;">
+                <span class="ai-suggestion">Create a mockup schedule for housekeeping next week</span>
+                <span class="ai-suggestion">Who had the most OT last month?</span>
+                <span class="ai-suggestion">Which department has the highest labor cost?</span>
+                <span class="ai-suggestion">Give me a labor cost summary for this month</span>
+                <span class="ai-suggestion">Which employees are at OT risk this week?</span>
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -539,94 +598,109 @@ def render_aipilot(hotel: str):
         st.warning("Please type a question first.")
         return
 
-    # ── Infer date range from the question ──
+    # ── Resolve dates + intents ──
     start_date, end_date = parse_dates_from_question(question)
     intents = detect_intent(question)
-
     days = (end_date - start_date).days + 1
+
+    today = date.today()
     if start_date == end_date:
         period_label = start_date.strftime("%B %d, %Y")
-    elif start_date == date.today() - timedelta(days=6) and end_date == date.today():
+    elif start_date == today - timedelta(days=6) and end_date == today:
         period_label = "Last 7 days"
+    elif start_date == today.replace(day=1):
+        period_label = f"This month ({start_date.strftime('%B %Y')})"
     else:
         period_label = f"{start_date.strftime('%b %d')} – {end_date.strftime('%b %d, %Y')}"
 
-    # ── Fetch data ──
-    with st.spinner(""):
-        st.markdown('<div style="color:rgba(167,139,250,0.6);font-size:12px;margin:4px 0 0 2px;">Pulling your data...</div>', unsafe_allow_html=True)
+    # ── Fetch all data ──
+    with st.spinner("Reading your database..."):
         try:
-            data = fetch_data(hotel, start_date, end_date, intents)
+            data          = fetch_labor_data(hotel, start_date, end_date, intents)
+            employees_df  = fetch_employees(hotel)
+            positions_df  = fetch_positions(hotel)
+            existing_sched = fetch_existing_schedule(hotel, start_date, end_date)
         except Exception as e:
             st.error(f"Database error: {e}")
             return
 
-    totals = data.get("totals", pd.DataFrame())
-    if totals.empty or float(totals.iloc[0].get("total_hours", 0)) == 0:
-        st.warning(f"No labor data found for **{hotel}** in the period **{period_label}**. Make sure actual hours have been uploaded for this timeframe.")
-        return
-
-    t = totals.iloc[0]
-    total_hours   = float(t.get("total_hours", 0))
-    total_ot      = float(t.get("total_ot_hours", 0))
-    reg_pay       = float(t.get("total_reg_pay", 0))
-    ot_pay        = float(t.get("total_ot_pay", 0))
-    total_cost    = reg_pay + ot_pay
-    unique_emps   = int(t.get("unique_employees", 0))
-    ot_pct        = (total_ot / total_hours * 100) if total_hours > 0 else 0
-
     # ── Period badge ──
-    st.markdown(f"""
-    <div class="ai-period-badge">
-        ◈ Analyzing: {period_label} · {days} day{'s' if days > 1 else ''}
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f'<div class="ai-period-badge">◈ Period: {period_label} · {days} day{"s" if days > 1 else ""}</div>', unsafe_allow_html=True)
 
-    # ── KPI metrics ──
-    st.markdown(f"""
-    <div class="ai-metrics-row">
-        <div class="ai-metric">
-            <div class="val">{total_hours:,.0f}</div>
-            <div class="lbl">Total Hours</div>
+    # ── KPI pills (only if actual data exists) ──
+    totals = data.get("totals", pd.DataFrame())
+    has_actuals = not totals.empty and float(totals.iloc[0].get("total_hours", 0)) > 0
+    if has_actuals:
+        t = totals.iloc[0]
+        total_hours  = float(t.get("total_hours", 0))
+        total_ot     = float(t.get("total_ot_hours", 0))
+        reg_pay      = float(t.get("total_reg_pay", 0))
+        ot_pay       = float(t.get("total_ot_pay", 0))
+        total_cost   = reg_pay + ot_pay
+        unique_emps  = int(t.get("unique_employees", 0))
+        ot_pct       = (total_ot / total_hours * 100) if total_hours > 0 else 0
+        st.markdown(f"""
+        <div class="ai-metrics-row">
+            <div class="ai-metric"><div class="val">{total_hours:,.0f}</div><div class="lbl">Total Hours</div></div>
+            <div class="ai-metric"><div class="val red">{total_ot:,.1f}</div><div class="lbl">OT Hours ({ot_pct:.1f}%)</div></div>
+            <div class="ai-metric"><div class="val teal">${total_cost:,.0f}</div><div class="lbl">Labor Cost</div></div>
+            <div class="ai-metric"><div class="val red">${ot_pay:,.0f}</div><div class="lbl">OT Pay</div></div>
+            <div class="ai-metric"><div class="val">{unique_emps}</div><div class="lbl">Employees</div></div>
         </div>
-        <div class="ai-metric">
-            <div class="val red">{total_ot:,.1f}</div>
-            <div class="lbl">OT Hours ({ot_pct:.1f}%)</div>
-        </div>
-        <div class="ai-metric">
-            <div class="val teal">${total_cost:,.0f}</div>
-            <div class="lbl">Labor Cost</div>
-        </div>
-        <div class="ai-metric">
-            <div class="val red">${ot_pay:,.0f}</div>
-            <div class="lbl">OT Pay</div>
-        </div>
-        <div class="ai-metric">
-            <div class="val">{unique_emps}</div>
-            <div class="lbl">Employees</div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
+    elif not employees_df.empty:
+        st.markdown(f'<div class="ai-metric" style="display:inline-block;margin-bottom:12px;"><div class="val">{len(employees_df)}</div><div class="lbl">Employees on Roster</div></div>', unsafe_allow_html=True)
 
-    # ── AI Summary ──
+    # ── AI call ──
     with st.spinner("Generating your answer..."):
         try:
-            prompt  = build_dynamic_prompt(hotel, start_date, end_date, question, data, intents)
+            prompt  = build_prompt(hotel, start_date, end_date, question, data, intents,
+                                   employees_df, positions_df, existing_sched)
             summary = call_groq(prompt)
         except Exception as e:
             st.error(f"AI error: {e}")
             return
 
+    # ── Response card ──
     st.markdown(f"""
     <div class="ai-model-tag">✦ Llama 3.3 · 70B</div>
     <div class="ai-response-card">{summary}</div>
     """, unsafe_allow_html=True)
 
-    # ── Charts ──
-    st.markdown("""
-    <div class="ai-charts-header">◈ Supporting Charts</div>
-    <div class="ai-charts-divider"></div>
-    """, unsafe_allow_html=True)
+    # ── If schedule mockup: show a formatted table if AI produced one ──
+    if "schedule_mockup" in intents and not employees_df.empty:
+        with st.expander("View Employee Roster Used", expanded=False):
+            st.dataframe(employees_df, use_container_width=True)
+        if not existing_sched.empty:
+            with st.expander("View Existing Schedule for This Period", expanded=False):
+                st.dataframe(existing_sched, use_container_width=True)
 
-    charts = render_smart_charts(data, intents, question)
-    if charts == 0:
-        st.info("No chart data available for this query.")
+    # ── Charts (only if actuals exist) ──
+    if has_actuals:
+        st.markdown('<div class="ai-charts-header">Supporting Charts</div><div class="ai-charts-divider"></div>', unsafe_allow_html=True)
+        render_charts(data, intents)
+
+    # ── Email section ──
+    st.markdown('<div class="ai-email-card"><div class="ai-email-title">📧 Email This Report</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    with st.container():
+        st.markdown("**Send this report by email:**")
+        email_input = st.text_input(
+            "Recipient email address(es)",
+            placeholder="email@example.com, another@example.com",
+            key="ai_email_recipients",
+        )
+        send_btn = st.button("Send Report via Email", key="ai_send_email")
+
+        if send_btn:
+            if not email_input.strip():
+                st.warning("Please enter at least one email address.")
+            else:
+                recipients = [e.strip() for e in email_input.split(",") if e.strip()]
+                with st.spinner("Sending report..."):
+                    try:
+                        send_ai_report(recipients, hotel, question, summary, period_label, data)
+                        st.success(f"Report sent to {', '.join(recipients)}")
+                    except Exception as e:
+                        st.error(f"Failed to send: {e}")

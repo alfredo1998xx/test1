@@ -445,6 +445,62 @@ def table_md_to_df(table_text: str) -> pd.DataFrame:
     return df
 
 
+def _text_to_html(text: str) -> str:
+    """
+    Convert AI plain-text/markdown response to safe HTML.
+    - Escapes $ to prevent Streamlit LaTeX rendering
+    - Converts **bold**, bullet lists, blank lines to HTML
+    """
+    import html as _html
+
+    lines   = text.splitlines()
+    out     = []
+    in_list = False
+
+    for line in lines:
+        # Detect bullet lines (-, *, •, numbered)
+        is_bullet = bool(re.match(r'^\s*([-*•]|\d+\.)\s+', line))
+
+        # Escape HTML special chars first (except we handle $ separately)
+        safe = _html.escape(line, quote=False)
+
+        # Restore < > for any we may want (none in AI output — keep escaped)
+        # Escape $ → &#36; (prevents Streamlit LaTeX interpretation)
+        safe = safe.replace("$", "&#36;")
+
+        # Bold: **text**
+        safe = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', safe)
+        # Italic: *text*  (only if not a bullet marker)
+        safe = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', safe)
+
+        if is_bullet:
+            # Strip the leading bullet/number marker
+            safe = re.sub(r'^\s*([-*•]|\d+\.)\s+', '', safe)
+            if not in_list:
+                out.append('<ul style="margin:8px 0 8px 20px;padding:0;">')
+                in_list = True
+            out.append(
+                f'<li style="margin:5px 0;font-size:14px;'
+                f'line-height:1.7;color:#1f2937;">{safe}</li>'
+            )
+        else:
+            if in_list:
+                out.append('</ul>')
+                in_list = False
+            if not safe.strip():
+                out.append('<div style="height:8px;"></div>')
+            else:
+                out.append(
+                    f'<p style="margin:0 0 6px;font-size:14px;'
+                    f'line-height:1.75;color:#1f2937;">{safe}</p>'
+                )
+
+    if in_list:
+        out.append('</ul>')
+
+    return "\n".join(out)
+
+
 def render_ai_response(raw: str):
     """Split AI text into prose and markdown-table segments, render each properly."""
     # Collapse 3+ blank lines → 2
@@ -479,8 +535,9 @@ def render_ai_response(raw: str):
 
     for kind, content in segments:
         if kind == "text" and content.strip():
+            html_content = _text_to_html(content)
             st.markdown(
-                f'<div class="ai-card">{content}</div>',
+                f'<div class="ai-card">{html_content}</div>',
                 unsafe_allow_html=True,
             )
         elif kind == "table":

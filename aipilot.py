@@ -420,8 +420,9 @@ def call_groq(prompt: str) -> str:
         raise ValueError("GROQ_API_KEY secret is not configured.")
     client = Groq(api_key=api_key)
     try:
+        model = st.session_state.get("aipilot_model", "llama-3.3-70b-versatile")
         resp = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=900,
@@ -1294,6 +1295,26 @@ def render_aipilot(hotel: str):
     </p>
     """, unsafe_allow_html=True)
 
+    # ── Model selector ──
+    MODELS = {
+        "llama-3.3-70b-versatile":        "⚡ Llama 3.3 70B  — Recommended. Fast, smart, great for labor reports.",
+        "deepseek-r1-distill-llama-70b":  "🧠 DeepSeek R1 70B  — Deep reasoning. Best for complex analysis & comparisons.",
+        "mixtral-8x7b-32768":             "📚 Mixtral 8x7B  — Long context (32k tokens). Great for schedule-heavy queries.",
+        "llama-3.1-8b-instant":           "🪶 Llama 3.1 8B Instant  — Fastest & most token-efficient. Saves daily quota.",
+    }
+    selected_model = st.selectbox(
+        "AI Model",
+        options=list(MODELS.keys()),
+        format_func=lambda m: MODELS[m],
+        index=list(MODELS.keys()).index(
+            st.session_state.get("aipilot_model", "llama-3.3-70b-versatile")
+        ),
+        key="_model_select",
+    )
+    st.session_state["aipilot_model"] = selected_model
+
+    st.markdown("<div style='margin-top:12px;'></div>", unsafe_allow_html=True)
+
     # ── ChatGPT-style input area ──
     question = st.text_area(
         "Ask a labor question",
@@ -1367,6 +1388,7 @@ def render_aipilot(hotel: str):
                 "th": th, "tot": tot, "tc": tc,
                 "op": op, "emp": emp, "ot_pct": ot_pct,
                 "intent": intent,
+                "model": selected_model,
             }
 
     # ── PHASE 2: Display (always, if results exist in session state) ──
@@ -1421,10 +1443,17 @@ def render_aipilot(hotel: str):
         """, unsafe_allow_html=True)
 
     # ── AI Summary ──
+    used_model = r.get("model", "llama-3.3-70b-versatile")
+    model_label = {
+        "llama-3.3-70b-versatile":       "Llama 3.3 70B",
+        "deepseek-r1-distill-llama-70b": "DeepSeek R1 70B",
+        "mixtral-8x7b-32768":            "Mixtral 8x7B",
+        "llama-3.1-8b-instant":          "Llama 3.1 8B",
+    }.get(used_model, used_model)
     st.markdown(
         '<div style="display:flex;align-items:center;gap:10px;margin-top:18px;">'
         '<span style="font-size:16px;font-weight:700;color:#1a1a2e;">Executive Summary</span>'
-        '<span class="ai-badge">AI · Llama 3.3 70B</span></div>',
+        f'<span class="ai-badge">AI · {model_label}</span></div>',
         unsafe_allow_html=True,
     )
     render_ai_response(summary)

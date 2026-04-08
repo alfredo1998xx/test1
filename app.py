@@ -1075,14 +1075,29 @@ def save_ot_risk_to_db(week_start, week_end, sel_dept, sel_pos):
 session = scoped_session(db.Session)
 
 # ---------- helpers -----------------------------------------------------------
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_refresh(tablename: str, hotel_name: str) -> pd.DataFrame:
+    """
+    Cached table fetch — returns same result for up to 30 s.
+    tablename comes only from SQLAlchemy model.__tablename__ (safe, not user input).
+    """
+    with ENGINE.connect() as conn:
+        if hotel_name:
+            sql = f"SELECT * FROM {tablename} WHERE hotel_name = :hotel"   # noqa: S608
+            return pd.read_sql_query(text(sql), conn, params={"hotel": hotel_name})
+        return pd.read_sql_query(text(f"SELECT * FROM {tablename}"), conn)  # noqa: S608
+
+
 def refresh(model):
-    """Return hotel-scoped SQLAlchemy table as DataFrame."""
-    hotel_name = st.session_state.get("hotel_name")
-    if hotel_name and hasattr(model, "hotel_name"):
-        query = session.query(model).filter_by(hotel_name=hotel_name)
-    else:
-        query = session.query(model)
-    return pd.read_sql(query.statement, session.bind)
+    """Return hotel-scoped SQLAlchemy table as DataFrame (cached 30 s)."""
+    hotel_name = st.session_state.get("hotel_name", "") or ""
+    tablename  = model.__tablename__
+    return _cached_refresh(tablename, hotel_name if hasattr(model, "hotel_name") else "")
+
+
+def bust_refresh_cache():
+    """Call after any DB write so the next refresh() hits the database fresh."""
+    _cached_refresh.clear()
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -1578,22 +1593,6 @@ if main_choice == "Dashboard":
 
 
     # STEP 2B — Load ACL for the logged-in user (manager only)
-    API_URL = "http://127.0.0.1:8000"  # change if your API runs elsewhere
-
-    def load_acl_for_current_user():
-        role_norm = st.session_state.user["role"].strip().lower()
-        if role_norm != "manager":
-            st.session_state.acl = None
-            return
-        if st.session_state.get("acl_loaded"):
-            return
-        headers = {"Authorization": f"Bearer {st.session_state.token}"}
-        # ... rest of your function ...
-
-
-    # STEP 2B — Load ACL for the logged-in user (manager only)
-    API_URL = "http://127.0.0.1:8000"  # change if your API runs elsewhere
-
     def load_acl_for_current_user():
         # Only managers need ACL; harmless for others
         role_norm = st.session_state.user["role"].strip().lower()

@@ -1268,7 +1268,7 @@ main_choice = st.sidebar.radio("Menu", menu_options, key="main_menu")
 # ── Sidebar logo (bottom-centered) ─────────────────────────────────────────
 import base64 as _b64, os as _os
 _logo_path = _os.path.join(_os.path.dirname(__file__), "attached_assets",
-                           "LaborPilot_logo_on_checkered_background_1775657495620.png")
+                           "laborpilot_logo_nobg.png")
 if _os.path.exists(_logo_path):
     with open(_logo_path, "rb") as _f:
         _logo_b64 = _b64.b64encode(_f.read()).decode()

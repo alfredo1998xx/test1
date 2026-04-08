@@ -327,24 +327,12 @@ def render_aipilot(hotel: str):
     """, unsafe_allow_html=True)
 
     # ── Inputs ──
-    col_q, col_dates = st.columns([3, 2])
-
-    with col_q:
-        question = st.text_area(
-            "What do you want to know?",
-            placeholder="e.g. How is our overtime trending? Which department has the highest labor cost? Who are our top OT earners?",
-            height=90,
-            key="ai_question",
-        )
-
-    with col_dates:
-        today = date.today()
-        default_start = today - timedelta(days=6)
-        date_range = st.date_input(
-            "Date Range",
-            value=(default_start, today),
-            key="ai_date_range",
-        )
+    question = st.text_area(
+        "What do you want to know?",
+        placeholder="e.g. How is our overtime last week? Which department had the highest labor cost this month? Show me YTD hours by department.",
+        height=90,
+        key="ai_question",
+    )
 
     run_btn = st.button("Generate Report", type="primary", use_container_width=False)
 
@@ -354,7 +342,7 @@ def render_aipilot(hotel: str):
                     padding:28px;text-align:center;color:#888;margin-top:16px;">
             <div style="font-size:32px;margin-bottom:8px;">🤖</div>
             <div style="font-size:15px;font-weight:600;color:#555;">Ready to analyze your labor data</div>
-            <div style="font-size:13px;margin-top:4px;">Select a date range, type your question, and click Generate Report</div>
+            <div style="font-size:13px;margin-top:4px;">Type your question — include the time period you want (e.g. "last week", "this month", "last 30 days")</div>
         </div>
         """, unsafe_allow_html=True)
         return
@@ -364,15 +352,42 @@ def render_aipilot(hotel: str):
         st.warning("Please enter a question before generating the report.")
         return
 
-    if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-        start_date, end_date = date_range[0], date_range[1]
-    else:
-        st.warning("Please select a valid date range.")
-        return
+    # ── Parse date range from question ──
+    today = date.today()
+    q_lower = question.lower()
 
-    if start_date > end_date:
-        st.error("Start date must be before end date.")
-        return
+    if "yesterday" in q_lower:
+        start_date = today - timedelta(days=1)
+        end_date   = today - timedelta(days=1)
+    elif "last week" in q_lower or "previous week" in q_lower:
+        start_date = today - timedelta(days=today.weekday() + 7)
+        end_date   = start_date + timedelta(days=6)
+    elif "this week" in q_lower or "current week" in q_lower:
+        start_date = today - timedelta(days=today.weekday())
+        end_date   = today
+    elif "last month" in q_lower or "previous month" in q_lower:
+        first_this = today.replace(day=1)
+        end_date   = first_this - timedelta(days=1)
+        start_date = end_date.replace(day=1)
+    elif "this month" in q_lower or "current month" in q_lower or "mtd" in q_lower or "month to date" in q_lower:
+        start_date = today.replace(day=1)
+        end_date   = today
+    elif "last 7 days" in q_lower or "past 7 days" in q_lower:
+        start_date = today - timedelta(days=6)
+        end_date   = today
+    elif "last 14 days" in q_lower or "past 14 days" in q_lower:
+        start_date = today - timedelta(days=13)
+        end_date   = today
+    elif "last 30 days" in q_lower or "past 30 days" in q_lower:
+        start_date = today - timedelta(days=29)
+        end_date   = today
+    elif "ytd" in q_lower or "year to date" in q_lower or "this year" in q_lower:
+        start_date = today.replace(month=1, day=1)
+        end_date   = today
+    else:
+        # Default: last 30 days
+        start_date = today - timedelta(days=29)
+        end_date   = today
 
     # ── Fetch data ──
     with st.spinner("Pulling data from your database..."):

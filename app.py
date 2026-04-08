@@ -1252,6 +1252,9 @@ if role == "employee":
 elif role == "night audit":
     # Night Audit only sees Room STATs
     menu_options = ["Room STATs"]
+elif role == "asset manager":
+    # Asset Managers only see the Reports page
+    menu_options = ["Reports"]
 else:
     # Hide Labor Structure from Managers
     if role == "manager":
@@ -11132,11 +11135,11 @@ elif main_choice == "Admin":
             new_password = st.text_input("Password", type="password", key="new_password_create_user")
 
             if role == "admin":
-                new_role = st.selectbox("Role", ["Manager", "Employee", "Night Audit"], key="role_create_user_admin")
+                new_role = st.selectbox("Role", ["Manager", "Employee", "Night Audit", "Asset Manager"], key="role_create_user_admin")
                 new_hotel = st.session_state.user["hotel_name"]
                 st.text_input("Hotel Name", value=new_hotel, disabled=True, key="hotel_name_display_admin")
             else:
-                new_role = st.selectbox("Role", ["Manager", "Admin", "Employee", "Night Audit", "Super User"], key="role_create_user_super")
+                new_role = st.selectbox("Role", ["Manager", "Admin", "Employee", "Night Audit", "Asset Manager", "Super User"], key="role_create_user_super")
                 new_hotel = st.text_input("Hotel Name", key="hotel_name_input_super")
 
             submit_user = st.form_submit_button("Create User")  # <-- inside the form
@@ -11329,11 +11332,11 @@ elif main_choice == "Admin":
                 selected = df[df["username"] == selected_user].iloc[0]
 
                 if role == "admin":
-                    new_role = st.selectbox("New Role", ["Manager", "Admin", "Employee", "Night Audit"])
+                    new_role = st.selectbox("New Role", ["Manager", "Admin", "Employee", "Night Audit", "Asset Manager"])
                     st.text_input("Hotel Name", value=selected["hotel_name"], disabled=True)
                     new_hotel = selected["hotel_name"]
                 else:
-                    new_role = st.selectbox("New Role", ["Manager", "Admin", "Employee", "Night Audit", "Super User"])
+                    new_role = st.selectbox("New Role", ["Manager", "Admin", "Employee", "Night Audit", "Asset Manager", "Super User"])
                     new_hotel = st.text_input("Hotel Name", value=selected["hotel_name"])
 
                 if st.button("Update User"):

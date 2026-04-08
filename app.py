@@ -809,7 +809,7 @@ if "token" not in st.session_state:
             <div style="font-size:22px; font-weight:800; color:#111; line-height:1.15; letter-spacing:-0.5px;">Labor<br>Pilot</div>
         </div>
         """, unsafe_allow_html=True)
-        st.title("Hotel Login")
+        st.markdown('<h1 style="font-size:2.1rem; margin:0 0 0.75rem 0;">Hotel Login</h1>', unsafe_allow_html=True)
 
         _form_ver = st.session_state.get("_logout_count", 0)
         with st.form(f"login_form_{_form_ver}"):

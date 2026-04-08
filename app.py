@@ -460,6 +460,7 @@ is_logged_in = bool(st.session_state.get("user")) or bool(st.session_state.get("
 # =========================================================
 # LATEST ACTUAL HOURS QUERY
 # =========================================================
+@st.cache_data(ttl=300, show_spinner=False)
 def get_latest_actual_hours_date():
     session = get_scoped_session()
 
@@ -1075,6 +1076,37 @@ def refresh(model):
     else:
         query = session.query(model)
     return pd.read_sql(query.statement, session.bind)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _cached_query(sql: str, params: dict):
+    """Generic cached SQL query — use for read-only, non-user-specific queries."""
+    with ENGINE.connect() as conn:
+        return pd.read_sql_query(text(sql), conn, params=params)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_departments_cached(hotel_name: str):
+    return _cached_query(
+        "SELECT id, name FROM departments WHERE hotel_name=:h ORDER BY name",
+        {"h": hotel_name}
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_positions_cached(hotel_name: str):
+    return _cached_query(
+        "SELECT id, name, department_id FROM positions WHERE hotel_name=:h ORDER BY name",
+        {"h": hotel_name}
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_employees_cached(hotel_name: str):
+    return _cached_query(
+        "SELECT id, name, department, role, hourly_rate, emp_type FROM employee WHERE hotel_name=:h ORDER BY name",
+        {"h": hotel_name}
+    )
 # ---------- helper: convert weekday label -> placeholder DATE --------------
 from datetime import date  # already imported at top
 # map 3-letter weekday -> placeholder DATE in the dummy week
@@ -1336,8 +1368,8 @@ st.markdown("""
 
     /* ───── Sidebar Width ───── */
     [data-testid="stSidebar"][aria-expanded="true"] > div:first-child {
-        width: 220px;
-        min-width: 220px;
+        width: 170px;
+        min-width: 170px;
     }
 
     /* ───── Sidebar Text Styling ───── */

@@ -29,7 +29,15 @@ def _get_database_url():
     return url
 
 _DB_URL = _get_database_url()
-_engine_kwargs = {} if _DB_URL.startswith("postgresql") else {"connect_args": {"check_same_thread": False}}
+if _DB_URL.startswith("postgresql"):
+    _engine_kwargs = {
+        "pool_size": 10,
+        "max_overflow": 20,
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+    }
+else:
+    _engine_kwargs = {"connect_args": {"check_same_thread": False}}
 ENGINE = create_engine(_DB_URL, echo=False, **_engine_kwargs)
 
 # Custom query class to auto-filter by hotel_name

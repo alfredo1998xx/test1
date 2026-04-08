@@ -145,6 +145,7 @@ def parse_date_range(question: str):
 # ─────────────────────────────────────────────────────────────────────────────
 # DATA FETCHING
 # ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=180, show_spinner=False)
 def _q(sql: str, params: dict) -> pd.DataFrame:
     with ENGINE.connect() as conn:
         return pd.read_sql_query(text(sql), conn, params=params)
